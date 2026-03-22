@@ -1,0 +1,126 @@
+{
+  "theme": "dark",
+  "typography": {
+    "fonts": {
+      "headings": "Chivo",
+      "body": "IBM Plex Sans",
+      "mono": "JetBrains Mono"
+    },
+    "rules": {
+      "headings": "tracking-tight or tracking-tighter, uppercase for panel titles. Use font-light to font-black for weight contrast.",
+      "numbers": "Use Chivo for large data points and metrics, tight line height (leading-none).",
+      "terminal": "Use JetBrains Mono for the Brain Panel to give a retro-futurist institutional feel.",
+      "labels": "Uppercase, tiny text (text-xs), wide spacing (tracking-[0.2em]) for overlines and labels."
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#0A0A0B",
+      "surface": "#121214",
+      "surfaceHover": "#18181B",
+      "terminal": "#050505"
+    },
+    "border": {
+      "default": "#27272A",
+      "active": "#3F3F46",
+      "focus": "#0EA5E9"
+    },
+    "text": {
+      "primary": "#F4F4F5",
+      "secondary": "#A1A1AA",
+      "muted": "#71717A"
+    },
+    "brand": {
+      "primary": "#0EA5E9",
+      "ai_accent": "#22D3EE",
+      "glow": "rgba(34, 211, 238, 0.15)"
+    },
+    "signals": {
+      "buy": "#10B981",
+      "sell": "#EF4444",
+      "warning": "#F59E0B",
+      "neutral": "#0EA5E9"
+    }
+  },
+  "visual_enhancers": {
+    "texture": "Use a subtle CSS noise/grain overlay (opacity 0.02) over the entire dashboard to kill digital flatness and enhance the 'institutional' feel.",
+    "borders": "Grid Borders (The 'Technical' Look). Use sharp edges (rounded-none or max rounded-sm). Make the grid skeleton visible with border-collapse styles where applicable.",
+    "glows": "Use subtle drop-shadows (e.g., drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]) ONLY for the 'Active' AI agent in the Brain Panel or high-conviction signals.",
+    "glassmorphism": "Avoid heavy glass in this dashboard to maintain high-contrast data clarity. Use flat, solid surfaces with 1px borders."
+  },
+  "layouts": {
+    "type": "High Density Grid (For Dashboards / Analytics)",
+    "container": "w-full min-h-screen bg-[#0A0A0B] text-[#F4F4F5] p-2 md:p-4 font-body overflow-x-hidden",
+    "spacing": "Tight gaps between major panels (gap-4). Internal padding for cards should be generous enough for readability (p-4 to p-6).",
+    "structure": {
+      "header": "Top bar: Logo left, Stock Search center, Global Status right. border-b border-[#27272A].",
+      "main_grid": "CSS Grid: grid-cols-1 lg:grid-cols-12 gap-4 mt-4.",
+      "signals_row": "col-span-12 lg:col-span-8 grid grid-cols-2 md:grid-cols-4 gap-4. Shows Buy/Sell, Win Prob, Sentiment Score, Risk/Reward.",
+      "chart_area": "col-span-12 lg:col-span-8 h-[500px] border border-[#27272A] bg-[#121214].",
+      "brain_panel": "col-span-12 lg:col-span-4 lg:row-span-2 border border-[#27272A] bg-[#050505] flex flex-col.",
+      "bottom_row": "col-span-12 lg:col-span-8 grid grid-cols-1 md:grid-cols-2 gap-4 (News Feed & Backtesting Results)."
+    }
+  },
+  "components": [
+    {
+      "name": "Header & Search",
+      "rules": "Solid background. Input uses Shadcn but heavily customized: flat, no rounded corners, border-[#27272A], focus:border-[#0EA5E9] focus:ring-1 focus:ring-[#0EA5E9]. Left align text."
+    },
+    {
+      "name": "Data Cards (Bento Items)",
+      "rules": "Flat background (#121214), 1px solid border (#27272A). No shadow by default. On hover: slight border color lighten, NO translateY lift to keep institutional feel solid. Metric values in Chivo, tracking-tight."
+    },
+    {
+      "name": "Brain Panel (Agent Terminal)",
+      "rules": "Retro-Futurism style. Black background (#050505). Divide into 4 sections for agents. Active agent gets a cyan left-border and text glow. Use JetBrains Mono for streaming thought processes. Add a blinking cursor block."
+    },
+    {
+      "name": "Candlestick Chart",
+      "rules": "Integrate 'lightweight-charts'. Customize colors: background #121214, grid lines #27272A, up color #10B981, down color #EF4444. Overlay custom HTML labels for AI Signals (Buy/Sell markers)."
+    },
+    {
+      "name": "News Feed",
+      "rules": "List layout. Each item has a sentiment badge (Green/Red/Grey). Hover state highlights the row with a very subtle background (#18181B)."
+    }
+  ],
+  "motion": {
+    "micro_interactions": "Hover states on all interactive elements. Button hovers change background to a lighter hue of active state.",
+    "agent_thinking": "Use framer-motion to create a pulsing opacity effect (0.5 to 1) for the 'thinking' status of agents.",
+    "data_updates": "When a signal probability changes, animate the number counter or flash the background briefly (green/red) at 10% opacity."
+  },
+  "accessibility": {
+    "contrast": "Ensure text contrast meets APCA/WCAG standards. Use #F4F4F5 for primary text, #A1A1AA for secondary.",
+    "focus": "High contrast focus rings on search and interactive elements.",
+    "testing": "All interactive elements MUST include data-testid attributes (e.g., data-testid='stock-search-input', data-testid='buy-signal-card')."
+  },
+  "3d_libraries": {
+    "decision": "Not using heavy 3D for this institutional dashboard to maintain maximum performance and data clarity. Relying on lightweight-charts for primary visualization."
+  },
+  "instructions_to_main_agent": [
+    "1. Setup Tailwind config with the specified colors, fonts (Chivo, IBM Plex Sans, JetBrains Mono), and sharp border radii.",
+    "2. Install 'lightweight-charts' for the candlestick chart. Do not use generic recharts for the main price chart.",
+    "3. Install 'lucide-react' for icons, 'framer-motion' for agent thinking animations, and 'sonner' for toasts.",
+    "4. Build the layout using CSS Grid based on the high-density 'Bento' grid protocol. Ensure all grid items stretch to fill.",
+    "5. For the 'Brain Panel', implement a scrolling terminal-like view using JetBrains Mono. Mock the 4 agents' thought streams (Technical, Sentiment, Risk, Chief).",
+    "6. Add a subtle noise overlay fixed to the background to break digital flatness.",
+    "7. Mock the chart data (candlesticks) and the agent logs since there's no real backend provided yet.",
+    "8. Implement Shadcn UI for inputs/badges but override them to remove rounded corners (use rounded-none or rounded-sm) and apply the technical border styles.",
+    "9. DO NOT use transparent backgrounds for dropdowns or the header.",
+    "10. Include data-testid attributes on all interactive elements."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. In frontend design, this creates what users call the 'AI slop' aesthetic. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "You MUST NOT apply universal transition. Eg: transition: all. Always add transitions for specific interactive elements like button, input excluding transforms.",
+    "You MUST NOT center align the app container, ie do not add .App { text-align: center; } in the css file.",
+    "Always use modern button styles like pill-shaped, or sharp button with interaction animations & color relevant to the app style.",
+    "NEVER use AI assistant Emoji characters like 🤖🧠💭💡🔮🎯📚🎭🎬🎪🎉🎊🎁🎀🎂🍰🎈🎨🎰💰💵💳🏦💎🪙💸🤑📊📈📉💹🔢🏆🥇 etc for icons.",
+    "Every interaction needs micro-animations - hover states, transitions, parallax effects, and entrance animations. Static = dead.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "Prioritize using pre-existing components from src/components/ui when applicable.",
+    "Components MUST use named exports (export const ComponentName = ...). Pages MUST use default exports.",
+    "Use sonner for toasts. Sonner component are located in /app/src/components/ui/sonner.tsx."
+  ]
+}
