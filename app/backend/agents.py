@@ -90,6 +90,22 @@ def _ema(values: List[float], period: int) -> float:
     return value
 
 
+def _macd_series(closes: List[float]) -> Tuple[List[float], float]:
+    if not closes:
+        return [], 0.0
+
+    alpha_12 = 2.0 / (12 + 1)
+    alpha_26 = 2.0 / (26 + 1)
+    ema12 = closes[0]
+    ema26 = closes[0]
+    macd_values: List[float] = []
+    for close in closes:
+        ema12 = alpha_12 * close + (1 - alpha_12) * ema12
+        ema26 = alpha_26 * close + (1 - alpha_26) * ema26
+        macd_values.append(ema12 - ema26)
+    return macd_values, macd_values[-1]
+
+
 def _rsi(closes: List[float], period: int = 14) -> float:
     if len(closes) <= period:
         return 50.0
@@ -119,10 +135,8 @@ def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, A
     sma_20 = mean(closes[-20:]) if len(closes) >= 20 else mean(closes)
     sma_50 = mean(closes[-50:]) if len(closes) >= 50 else mean(closes)
     rsi_14 = _rsi(closes=closes, period=14)
-    ema_12 = _ema(closes[-80:], 12)
-    ema_26 = _ema(closes[-80:], 26)
-    macd = ema_12 - ema_26
-    signal_line = _ema([macd] * 9, 9)
+    macd_values, macd = _macd_series(closes[-120:])
+    signal_line = _ema(macd_values[-9:] if len(macd_values) >= 9 else macd_values, 9)
     support = min(lows[-50:]) if len(lows) >= 50 else min(lows)
     resistance = max(highs[-50:]) if len(highs) >= 50 else max(highs)
     last_close = closes[-1]

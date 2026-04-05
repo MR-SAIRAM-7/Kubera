@@ -107,9 +107,9 @@ async def get_nse_stock_overview(symbol: str, filings_limit: int = Query(default
     try:
         scraper = NSEScraper()
         return scraper.get_stock_and_market_overview(symbol=symbol, filings_limit=filings_limit)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("NSE scraping failed for %s", symbol)
-        raise HTTPException(status_code=502, detail="NSE scraping failed") from exc
+        raise HTTPException(status_code=502, detail="NSE scraping failed")
 
 
 @api_router.get("/market/nse/raw")
@@ -120,9 +120,9 @@ async def get_nse_raw_api_data(request: Request, api_path: str = Query(..., desc
 
         scraper = NSEScraper()
         return scraper.get_any_data(api_path=api_path, params=query_params or None)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("NSE raw API scraping failed for path %s", api_path)
-        raise HTTPException(status_code=502, detail="NSE raw API scraping failed") from exc
+        raise HTTPException(status_code=502, detail="NSE raw API scraping failed")
 
 
 @api_router.get("/market/bse/{stock_query}")
@@ -130,9 +130,9 @@ async def get_bse_stock_overview(stock_query: str):
     try:
         scraper = BSEScraper()
         return scraper.get_stock_and_market_overview(stock_query=stock_query)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("BSE scraping failed for %s", stock_query)
-        raise HTTPException(status_code=502, detail="BSE scraping failed") from exc
+        raise HTTPException(status_code=502, detail="BSE scraping failed")
 
 
 @api_router.get("/news/{stock_query}")
@@ -140,9 +140,9 @@ async def get_stock_news(stock_query: str, limit: int = Query(default=20, ge=1, 
     try:
         scraper = NewsScraper()
         return scraper.get_latest_related_news(stock_query=stock_query, limit=limit)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("News scraping failed for %s", stock_query)
-        raise HTTPException(status_code=502, detail="News scraping failed") from exc
+        raise HTTPException(status_code=502, detail="News scraping failed")
 
 
 @api_router.get("/dashboard/{symbol}")
@@ -178,12 +178,12 @@ async def get_autonomous_dashboard(symbol: str, news_limit: int = Query(default=
             nse_raw_fetcher=nse_live_candle_fetcher,
             lookback_points=240,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("Dashboard synthesis failed for %s", symbol)
         raise HTTPException(
             status_code=502,
             detail="Dashboard synthesis failed. Live data source is unavailable for the requested symbol.",
-        ) from exc
+        )
 
 
 class PredictionOutcome(BaseModel):

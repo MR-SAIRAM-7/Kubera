@@ -3,7 +3,7 @@ import axios from "axios";
 import { createChart } from "lightweight-charts";
 import { motion } from "framer-motion";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
 const REFRESH_INTERVAL_MS = 120000;
 
