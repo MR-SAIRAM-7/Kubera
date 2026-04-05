@@ -14,13 +14,13 @@ try:
     from .NSE.nseScraper import NSEScraper
     from .BSE.bseScraper import BSEScraper
     from .social.getNews import NewsScraper
-    from .agents import build_dashboard_snapshot
+    from .agents import build_dashboard_snapshot, ScenarioStore
 except ImportError:
     # Fallback for running as a script from backend working directory.
     from NSE.nseScraper import NSEScraper
     from BSE.bseScraper import BSEScraper
     from social.getNews import NewsScraper
-    from agents import build_dashboard_snapshot
+    from agents import build_dashboard_snapshot, ScenarioStore
 
 
 ROOT_DIR = Path(__file__).parent
@@ -52,6 +52,7 @@ app = FastAPI()
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
+scenario_store = ScenarioStore(max_samples_per_scenario=500)
 
 
 # Define Models
@@ -108,7 +109,7 @@ async def get_nse_stock_overview(symbol: str, filings_limit: int = Query(default
         return scraper.get_stock_and_market_overview(symbol=symbol, filings_limit=filings_limit)
     except Exception as exc:  # noqa: BLE001
         logger.exception("NSE scraping failed for %s", symbol)
-        raise HTTPException(status_code=502, detail=f"NSE scraping failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="NSE scraping failed") from exc
 
 
 @api_router.get("/market/nse/raw")
@@ -121,7 +122,7 @@ async def get_nse_raw_api_data(request: Request, api_path: str = Query(..., desc
         return scraper.get_any_data(api_path=api_path, params=query_params or None)
     except Exception as exc:  # noqa: BLE001
         logger.exception("NSE raw API scraping failed for path %s", api_path)
-        raise HTTPException(status_code=502, detail=f"NSE raw API scraping failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="NSE raw API scraping failed") from exc
 
 
 @api_router.get("/market/bse/{stock_query}")
@@ -131,7 +132,7 @@ async def get_bse_stock_overview(stock_query: str):
         return scraper.get_stock_and_market_overview(stock_query=stock_query)
     except Exception as exc:  # noqa: BLE001
         logger.exception("BSE scraping failed for %s", stock_query)
-        raise HTTPException(status_code=502, detail=f"BSE scraping failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="BSE scraping failed") from exc
 
 
 @api_router.get("/news/{stock_query}")
@@ -141,7 +142,7 @@ async def get_stock_news(stock_query: str, limit: int = Query(default=20, ge=1, 
         return scraper.get_latest_related_news(stock_query=stock_query, limit=limit)
     except Exception as exc:  # noqa: BLE001
         logger.exception("News scraping failed for %s", stock_query)
-        raise HTTPException(status_code=502, detail=f"News scraping failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="News scraping failed") from exc
 
 
 @api_router.get("/dashboard/{symbol}")
@@ -152,10 +153,53 @@ async def get_autonomous_dashboard(symbol: str, news_limit: int = Query(default=
 
         market_data = nse_scraper.get_stock_and_market_overview(symbol=symbol, filings_limit=10)
         news_data = news_scraper.get_latest_related_news(stock_query=symbol, limit=news_limit)
-        return build_dashboard_snapshot(symbol=symbol, quote_payload=market_data, news_payload=news_data)
+        def nse_live_candle_fetcher(path: str, ticker: str):
+            upper = ticker.upper().strip()
+            if path == "/api/chart-databyindex":
+                for candidate in (f"{upper}EQN", upper, f"NIFTY {upper}"):
+                    try:
+                        data = nse_scraper.get_any_data(path, params={"index": candidate})
+                        if data:
+                            return data
+                    except Exception:
+                        continue
+                return None
+            if path == "/api/chart-databysymbol":
+                return nse_scraper.get_any_data(path, params={"symbol": upper})
+            if path == "/api/historical/cm/equity":
+                return nse_scraper.get_any_data(path, params={"symbol": upper, "series": ["EQ"]})
+            return None
+
+        return build_dashboard_snapshot(
+            symbol=symbol,
+            quote_payload=market_data,
+            news_payload=news_data,
+            scenario_store=scenario_store,
+            nse_raw_fetcher=nse_live_candle_fetcher,
+            lookback_points=240,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Dashboard synthesis failed for %s", symbol)
-        raise HTTPException(status_code=502, detail=f"Dashboard synthesis failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail="Dashboard synthesis failed. Live data source is unavailable for the requested symbol.",
+        ) from exc
+
+
+class PredictionOutcome(BaseModel):
+    prediction_id: str
+    exit_price: float
+
+
+@api_router.post("/dashboard/predictions/resolve")
+async def resolve_dashboard_prediction(payload: PredictionOutcome):
+    result = scenario_store.resolve_prediction(
+        prediction_id=payload.prediction_id,
+        exit_price=payload.exit_price,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Prediction id not found")
+    return result
 
 # Include the router in the main app
 app.include_router(api_router)

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
 from datetime import datetime, timezone
-import hashlib
-import math
-import random
 from statistics import mean, pstdev
-from typing import Any, Dict, List, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 
 def _to_float(value: Any, fallback: float = 0.0) -> float:
@@ -18,56 +15,79 @@ def _to_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
-def generate_candles(symbol: str, last_price: float, previous_close: float, points: int = 120) -> List[Dict[str, float]]:
-    baseline = last_price if last_price > 0 else (previous_close if previous_close > 0 else 100.0)
-    drift = ((last_price - previous_close) / previous_close) if previous_close > 0 else 0.0
-    seed = int(hashlib.sha256(f"{symbol}:{baseline}:{previous_close}".encode("utf-8")).hexdigest()[:12], 16)
-    rng = random.Random(seed)
-
+def _from_series_rows(rows: List[Dict[str, Any]], points: int = 240) -> List[Dict[str, float]]:
     candles: List[Dict[str, float]] = []
-    current = baseline * (1.0 - drift * 0.5)
-
-    for idx in range(max(points, 30)):
-        minute_factor = idx / max(points, 1)
-        directional_push = drift * (0.6 + minute_factor * 0.8)
-        noise = rng.uniform(-0.0025, 0.0025)
-        open_price = current
-        close_price = max(0.01, open_price * (1 + directional_push * 0.04 + noise))
-        spread = abs(close_price - open_price) + baseline * rng.uniform(0.0008, 0.0022)
-        high = max(open_price, close_price) + spread * rng.uniform(0.4, 1.0)
-        low = min(open_price, close_price) - spread * rng.uniform(0.4, 1.0)
-        low = max(0.01, low)
+    selected = rows[-points:] if rows else []
+    for idx, row in enumerate(selected):
+        open_p = _to_float(row.get("CH_OPENING_PRICE", row.get("open", 0)))
+        high_p = _to_float(row.get("CH_TRADE_HIGH_PRICE", row.get("high", 0)))
+        low_p = _to_float(row.get("CH_TRADE_LOW_PRICE", row.get("low", 0)))
+        close_p = _to_float(row.get("CH_CLOSING_PRICE", row.get("close", 0)))
+        if close_p <= 0:
+            continue
+        if open_p <= 0:
+            open_p = close_p
+        if high_p <= 0:
+            high_p = max(open_p, close_p)
+        if low_p <= 0:
+            low_p = min(open_p, close_p)
         candles.append(
             {
                 "t": idx,
-                "open": round(open_price, 2),
-                "high": round(high, 2),
-                "low": round(low, 2),
-                "close": round(close_price, 2),
+                "open": round(open_p, 2),
+                "high": round(max(high_p, open_p, close_p), 2),
+                "low": round(max(0.01, min(low_p, open_p, close_p)), 2),
+                "close": round(close_p, 2),
             }
         )
-        current = close_price
-
-    adjustment = (baseline - candles[-1]["close"]) / max(points, 1)
-    if adjustment:
-        for idx, candle in enumerate(candles):
-            shift = adjustment * idx
-            candle["open"] = round(max(0.01, candle["open"] + shift), 2)
-            candle["close"] = round(max(0.01, candle["close"] + shift), 2)
-            candle["high"] = round(max(candle["open"], candle["close"], candle["high"] + shift), 2)
-            candle["low"] = round(max(0.01, min(candle["open"], candle["close"], candle["low"] + shift)), 2)
-
     return candles
+
+
+def _fetch_live_candles(
+    symbol: str,
+    nse_raw_fetcher: Optional[Any] = None,
+    lookback_points: int = 240,
+) -> List[Dict[str, float]]:
+    if nse_raw_fetcher is None:
+        raise ValueError("Live market data source is required")
+
+    for path in ("/api/chart-databyindex", "/api/chart-databysymbol", "/api/historical/cm/equity"):
+        try:
+            payload = nse_raw_fetcher(path, symbol)
+            if not payload:
+                continue
+            if isinstance(payload, dict):
+                rows = (
+                    payload.get("grapthData")
+                    or payload.get("graphData")
+                    or payload.get("data")
+                    or payload.get("rows")
+                    or payload.get("candles")
+                    or []
+                )
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                rows = []
+            if not rows:
+                continue
+            normalized = _from_series_rows(rows=rows, points=lookback_points)
+            if len(normalized) >= 30:
+                return normalized
+        except Exception:
+            continue
+
+    raise ValueError(f"Live intraday/historical candles are unavailable for {symbol}")
 
 
 def _ema(values: List[float], period: int) -> float:
     if not values:
         return 0.0
     alpha = 2.0 / (period + 1)
-    ema_val = values[0]
-    for value in values[1:]:
-        ema_val = alpha * value + (1 - alpha) * ema_val
-    return ema_val
+    value = values[0]
+    for entry in values[1:]:
+        value = alpha * entry + (1 - alpha) * value
+    return value
 
 
 def _rsi(closes: List[float], period: int = 14) -> float:
@@ -75,8 +95,8 @@ def _rsi(closes: List[float], period: int = 14) -> float:
         return 50.0
     gains: List[float] = []
     losses: List[float] = []
-    for i in range(1, period + 1):
-        delta = closes[-i] - closes[-i - 1]
+    for idx in range(1, period + 1):
+        delta = closes[-idx] - closes[-idx - 1]
         if delta >= 0:
             gains.append(delta)
             losses.append(0.0)
@@ -88,45 +108,46 @@ def _rsi(closes: List[float], period: int = 14) -> float:
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+    return 100.0 - (100.0 / (1 + rs))
 
 
 def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, Any]:
     closes = [row["close"] for row in candles]
-    lows = [row["low"] for row in candles]
     highs = [row["high"] for row in candles]
-    volumes = [100000 + idx * 30 for idx in range(len(candles))]
+    lows = [row["low"] for row in candles]
 
     sma_20 = mean(closes[-20:]) if len(closes) >= 20 else mean(closes)
     sma_50 = mean(closes[-50:]) if len(closes) >= 50 else mean(closes)
-    rsi_14 = _rsi(closes, period=14)
-    ema_12 = _ema(closes[-60:], period=12)
-    ema_26 = _ema(closes[-60:], period=26)
+    rsi_14 = _rsi(closes=closes, period=14)
+    ema_12 = _ema(closes[-80:], 12)
+    ema_26 = _ema(closes[-80:], 26)
     macd = ema_12 - ema_26
-    signal_line = _ema([macd] * 9, period=9)
+    signal_line = _ema([macd] * 9, 9)
     support = min(lows[-50:]) if len(lows) >= 50 else min(lows)
     resistance = max(highs[-50:]) if len(highs) >= 50 else max(highs)
     last_close = closes[-1]
-    near_support = abs(last_close - support) / max(last_close, 1.0) <= 0.01
-    near_resistance = abs(resistance - last_close) / max(last_close, 1.0) <= 0.01
+    near_support = abs(last_close - support) / max(last_close, 1) <= 0.01
+    near_resistance = abs(resistance - last_close) / max(last_close, 1) <= 0.01
+    momentum = closes[-1] - closes[-6] if len(closes) > 6 else 0.0
 
-    bullish = int(sma_20 > sma_50) + int(macd > signal_line) + int(rsi_14 > 50) + int(near_support)
-    bearish = int(sma_20 < sma_50) + int(macd < signal_line) + int(rsi_14 < 45) + int(near_resistance)
-    if bullish > bearish:
+    bullish_votes = int(sma_20 > sma_50) + int(macd > signal_line) + int(rsi_14 > 52) + int(momentum > 0) + int(near_support)
+    bearish_votes = int(sma_20 < sma_50) + int(macd < signal_line) + int(rsi_14 < 45) + int(momentum < 0) + int(near_resistance)
+    if bullish_votes > bearish_votes:
         bias = "bullish"
-    elif bearish > bullish:
+    elif bearish_votes > bullish_votes:
         bias = "bearish"
     else:
         bias = "neutral"
 
-    pattern = "Order block demand retest" if near_support else ("Supply zone rejection" if near_resistance else "Range compression")
-    confidence = round(min(0.95, max(0.1, 0.5 + (bullish - bearish) * 0.08)), 3)
+    confidence = round(min(0.96, max(0.1, 0.5 + (bullish_votes - bearish_votes) * 0.08)), 3)
+    pattern = "Demand retest" if near_support else ("Supply rejection" if near_resistance else "Trend continuation")
 
     return {
         "agent": "technical",
         "symbol": symbol,
         "bias": bias,
         "confidence": confidence,
+        "detected_pattern": pattern,
         "indicators": {
             "sma_20": round(sma_20, 2),
             "sma_50": round(sma_50, 2),
@@ -135,37 +156,34 @@ def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, A
             "signal_line": round(signal_line, 4),
             "support": round(support, 2),
             "resistance": round(resistance, 2),
-            "volume_imbalance": round((volumes[-1] - mean(volumes[-20:])) / max(mean(volumes[-20:]), 1), 4),
+            "last_close": round(last_close, 2),
         },
-        "detected_pattern": pattern,
     }
 
 
 POSITIVE_WORDS = {
     "deal",
-    "win",
     "growth",
     "profit",
     "beats",
     "surge",
-    "expansion",
-    "approval",
     "contract",
-    "record",
+    "approval",
     "bullish",
+    "record",
+    "expansion",
 }
 NEGATIVE_WORDS = {
     "probe",
-    "fraud",
-    "loss",
     "decline",
+    "loss",
+    "fraud",
     "downgrade",
     "penalty",
     "volatility",
     "bearish",
-    "lawsuit",
-    "default",
     "delay",
+    "lawsuit",
 }
 
 
@@ -175,60 +193,53 @@ def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]
         items = []
 
     score = 0
-    alpha_events: List[str] = []
-    for item in items[:40]:
+    alpha_signals: List[str] = []
+    for item in items[:80]:
         text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
         pos_hits = sum(1 for token in POSITIVE_WORDS if token in text)
         neg_hits = sum(1 for token in NEGATIVE_WORDS if token in text)
-        score += (pos_hits - neg_hits) * 6
-        if pos_hits >= 2:
-            alpha_events.append(item.get("title", ""))
-        if neg_hits >= 2:
-            alpha_events.append(item.get("title", ""))
+        item_score = (pos_hits - neg_hits) * 5
+        score += item_score
+        if abs(item_score) >= 10:
+            alpha_signals.append(item.get("title", ""))
 
     normalized = max(-100, min(100, score))
     bias = "bullish" if normalized > 15 else ("bearish" if normalized < -15 else "neutral")
-    confidence = round(min(0.95, 0.45 + min(abs(normalized), 80) / 200), 3)
+    confidence = round(min(0.95, 0.45 + min(abs(normalized), 90) / 210), 3)
 
     return {
         "agent": "sentiment",
         "symbol": symbol,
+        "sentiment_score": normalized,
         "bias": bias,
         "confidence": confidence,
-        "sentiment_score": normalized,
-        "alpha_signals": alpha_events[:5],
         "samples_considered": len(items),
+        "alpha_signals": alpha_signals[:5],
     }
 
 
 def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str, Any]) -> Dict[str, Any]:
     closes = [row["close"] for row in candles]
-    if len(closes) < 3:
-        closes = closes + closes
     returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1] > 0]
     volatility = pstdev(returns) if len(returns) > 1 else 0.0
-    current_price = closes[-1]
-    var_95 = abs(current_price * volatility * 1.65)
-
-    true_ranges = [abs(row["high"] - row["low"]) for row in candles[-20:]] or [current_price * 0.01]
+    price = closes[-1]
+    var_95 = abs(price * volatility * 1.65)
+    true_ranges = [abs(row["high"] - row["low"]) for row in candles[-20:]] or [price * 0.01]
     atr = mean(true_ranges)
 
     bias = technical.get("bias", "neutral")
     if bias == "bullish":
-        stop_loss = current_price - max(atr * 1.2, var_95 * 0.9)
-        take_profit = current_price + max(atr * 2.2, var_95 * 1.8)
+        stop_loss = price - max(atr * 1.2, var_95 * 0.9)
+        take_profit = price + max(atr * 2.1, var_95 * 1.7)
     elif bias == "bearish":
-        stop_loss = current_price + max(atr * 1.2, var_95 * 0.9)
-        take_profit = current_price - max(atr * 2.2, var_95 * 1.8)
+        stop_loss = price + max(atr * 1.2, var_95 * 0.9)
+        take_profit = price - max(atr * 2.1, var_95 * 1.7)
     else:
-        stop_loss = current_price - atr
-        take_profit = current_price + atr * 1.5
+        stop_loss = price - atr
+        take_profit = price + atr * 1.4
 
-    rr_numerator = abs(take_profit - current_price)
-    rr_denominator = max(abs(current_price - stop_loss), 0.0001)
-    risk_reward = rr_numerator / rr_denominator
-    risk_state = "acceptable" if risk_reward >= 1.6 and volatility < 0.03 else "elevated"
-    confidence = round(0.55 if risk_state == "acceptable" else 0.4, 3)
+    rr = abs(take_profit - price) / max(abs(price - stop_loss), 0.0001)
+    risk_state = "acceptable" if rr >= 1.5 and volatility < 0.03 else "elevated"
 
     return {
         "agent": "risk",
@@ -237,64 +248,70 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
         "value_at_risk_95": round(var_95, 2),
         "stop_loss": round(stop_loss, 2),
         "take_profit": round(take_profit, 2),
-        "risk_reward_ratio": round(risk_reward, 2),
+        "risk_reward_ratio": round(rr, 2),
         "risk_state": risk_state,
-        "confidence": confidence,
+        "confidence": 0.58 if risk_state == "acceptable" else 0.42,
     }
 
 
-@dataclass(frozen=True)
-class Scenario:
-    trend: str
-    sentiment_bucket: str
-    macd_state: str
-    support_touch: bool
-    outcome_up: bool
+def _scenario_key(technical: Dict[str, Any], sentiment: Dict[str, Any], risk: Dict[str, Any]) -> str:
+    trend = technical.get("bias", "neutral")
+    sentiment_score = sentiment.get("sentiment_score", 0)
+    sentiment_bucket = "positive" if sentiment_score >= 25 else ("negative" if sentiment_score <= -25 else "neutral")
+    macd = technical.get("indicators", {}).get("macd", 0.0)
+    signal = technical.get("indicators", {}).get("signal_line", 0.0)
+    macd_state = "cross_up" if macd > signal else ("cross_down" if macd < signal else "flat")
+    risk_state = risk.get("risk_state", "elevated")
+    return f"{trend}|{sentiment_bucket}|{macd_state}|{risk_state}"
 
 
-def _bucket_sentiment(score: int) -> str:
-    if score >= 25:
-        return "positive"
-    if score <= -25:
-        return "negative"
-    return "neutral"
+class ScenarioStore:
+    def __init__(self, max_samples_per_scenario: int = 500):
+        self.max_samples_per_scenario = max_samples_per_scenario
+        self.scenarios: Dict[str, Deque[bool]] = {}
+        self.pending_predictions: Dict[str, Dict[str, Any]] = {}
+        self._counter = 0
 
+    def register_prediction(self, scenario_key: str, symbol: str, entry_price: float) -> str:
+        self._counter += 1
+        prediction_id = f"p_{self._counter}"
+        self.pending_predictions[prediction_id] = {
+            "scenario_key": scenario_key,
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return prediction_id
 
-def _scenario_bank(symbol: str, size: int = 500) -> List[Scenario]:
-    seed = int(hashlib.md5(symbol.encode("utf-8")).hexdigest()[:8], 16)
-    rng = random.Random(seed)
-    scenarios: List[Scenario] = []
-    for _ in range(size):
-        trend = rng.choice(["bullish", "bearish", "neutral"])
-        sentiment = rng.choice(["positive", "negative", "neutral"])
-        macd_state = rng.choice(["cross_up", "cross_down", "flat"])
-        support_touch = rng.random() < 0.35
-        base = 0.48
-        if trend == "bullish":
-            base += 0.1
-        if sentiment == "positive":
-            base += 0.08
-        if macd_state == "cross_up":
-            base += 0.06
-        if support_touch:
-            base += 0.04
-        if trend == "bearish":
-            base -= 0.1
-        if sentiment == "negative":
-            base -= 0.08
-        if macd_state == "cross_down":
-            base -= 0.06
-        chance = max(0.05, min(0.95, base + rng.uniform(-0.05, 0.05)))
-        scenarios.append(
-            Scenario(
-                trend=trend,
-                sentiment_bucket=sentiment,
-                macd_state=macd_state,
-                support_touch=support_touch,
-                outcome_up=rng.random() < chance,
-            )
-        )
-    return scenarios
+    def resolve_prediction(self, prediction_id: str, exit_price: float) -> Optional[Dict[str, Any]]:
+        prediction = self.pending_predictions.pop(prediction_id, None)
+        if prediction is None:
+            return None
+
+        scenario_key = prediction["scenario_key"]
+        entry_price = prediction["entry_price"]
+        outcome_up = bool(exit_price > entry_price)
+        if scenario_key not in self.scenarios:
+            self.scenarios[scenario_key] = deque(maxlen=self.max_samples_per_scenario)
+        self.scenarios[scenario_key].append(outcome_up)
+        history = self.scenarios[scenario_key]
+        wins = sum(1 for outcome in history if outcome)
+        return {
+            "prediction_id": prediction_id,
+            "scenario_key": scenario_key,
+            "samples": len(history),
+            "wins": wins,
+            "win_probability": round((wins / len(history)) * 100, 2) if history else 50.0,
+        }
+
+    def get_probability(self, scenario_key: str) -> Tuple[int, int, float]:
+        history = self.scenarios.get(scenario_key)
+        if not history:
+            return 0, 0, 50.0
+        wins = sum(1 for outcome in history if outcome)
+        total = len(history)
+        probability = (wins / total) * 100 if total else 50.0
+        return wins, total, round(probability, 2)
 
 
 def synthesizer_agent(
@@ -302,66 +319,42 @@ def synthesizer_agent(
     technical: Dict[str, Any],
     sentiment: Dict[str, Any],
     risk: Dict[str, Any],
+    scenario_store: ScenarioStore,
 ) -> Dict[str, Any]:
-    trend = technical.get("bias", "neutral")
-    macd = technical.get("indicators", {}).get("macd", 0.0)
-    signal_line = technical.get("indicators", {}).get("signal_line", 0.0)
-    macd_state = "cross_up" if macd > signal_line else ("cross_down" if macd < signal_line else "flat")
-    support = technical.get("indicators", {}).get("support", 0.0)
-    last_close = technical.get("indicators", {}).get("sma_20", 0.0)
-    support_touch = abs(last_close - support) / max(last_close, 1.0) <= 0.01
-    sentiment_bucket = _bucket_sentiment(sentiment.get("sentiment_score", 0))
+    scenario_key = _scenario_key(technical=technical, sentiment=sentiment, risk=risk)
+    wins, total, empirical_probability = scenario_store.get_probability(scenario_key)
 
-    bank = _scenario_bank(symbol=symbol, size=500)
-    exact = [
-        s
-        for s in bank
-        if s.trend == trend
-        and s.sentiment_bucket == sentiment_bucket
-        and s.macd_state == macd_state
-        and s.support_touch == support_touch
-    ]
-    if len(exact) < 80:
-        exact = [
-            s
-            for s in bank
-            if s.trend == trend and s.sentiment_bucket == sentiment_bucket and s.macd_state == macd_state
-        ]
-    if len(exact) < 40:
-        exact = [s for s in bank if s.trend == trend]
+    technical_signal = 1 if technical.get("bias") == "bullish" else (-1 if technical.get("bias") == "bearish" else 0)
+    sentiment_signal = sentiment.get("sentiment_score", 0) / 100
+    risk_multiplier = 1.0 if risk.get("risk_state") == "acceptable" else 0.75
 
-    wins = sum(1 for s in exact if s.outcome_up)
-    total = len(exact)
-    historical_prob = wins / total if total else 0.5
+    model_probability = 50 + technical_signal * 16 + sentiment_signal * 18
+    final_probability = (empirical_probability * 0.7 + model_probability * 0.3) if total > 0 else model_probability
+    final_probability = max(5.0, min(95.0, final_probability * risk_multiplier))
 
-    technical_score = 1 if technical.get("bias") == "bullish" else (-1 if technical.get("bias") == "bearish" else 0)
-    sentiment_score = sentiment.get("sentiment_score", 0) / 100
-    risk_multiplier = 1.0 if risk.get("risk_state") == "acceptable" else 0.7
-    blended = (0.5 + technical_score * 0.18 + sentiment_score * 0.16 + (historical_prob - 0.5) * 0.5) * risk_multiplier
-    win_probability = max(0.05, min(0.95, blended))
-
-    if win_probability >= 0.6 and risk.get("risk_reward_ratio", 0) >= 1.5:
+    if final_probability >= 60 and risk.get("risk_reward_ratio", 0) >= 1.5:
         signal = "BUY"
-    elif win_probability <= 0.4 and risk.get("risk_reward_ratio", 0) >= 1.5:
+    elif final_probability <= 40 and risk.get("risk_reward_ratio", 0) >= 1.5:
         signal = "SELL"
     else:
         signal = "HOLD"
 
     justification = (
-        f"{signal} with {round(win_probability * 100, 2)}% win probability. "
-        f"Historical confluence matched {total} similar setups with {wins} favorable outcomes. "
-        f"Technical bias is {technical.get('bias')} ({technical.get('detected_pattern')}); "
-        f"sentiment score is {sentiment.get('sentiment_score')}; "
-        f"risk/reward is {risk.get('risk_reward_ratio')} with VaR {risk.get('value_at_risk_95')}."
+        f"{signal} with {round(final_probability, 2)}% probability. "
+        f"Scenario={scenario_key}. "
+        f"Empirical outcomes: {wins}/{total} wins. "
+        f"Technical={technical.get('bias')} ({technical.get('detected_pattern')}), "
+        f"Sentiment={sentiment.get('sentiment_score')}, "
+        f"RR={risk.get('risk_reward_ratio')}."
     )
-
     return {
         "agent": "synthesizer",
         "symbol": symbol,
         "signal": signal,
-        "win_probability": round(win_probability * 100, 2),
-        "historical_matches": total,
+        "win_probability": round(final_probability, 2),
         "historical_wins": wins,
+        "historical_matches": total,
+        "scenario_key": scenario_key,
         "justification": justification,
     }
 
@@ -377,46 +370,68 @@ def build_brain_log(
         {
             "timestamp": now,
             "agent": "Technical Analyst",
-            "message": f"Bias {technical.get('bias')} | Pattern {technical.get('detected_pattern')} | RSI {technical.get('indicators', {}).get('rsi_14')}",
+            "message": f"{technical.get('bias')} | {technical.get('detected_pattern')} | RSI={technical.get('indicators', {}).get('rsi_14')}",
         },
         {
             "timestamp": now,
             "agent": "Sentiment Analyst",
-            "message": f"Sentiment {sentiment.get('sentiment_score')} with {sentiment.get('samples_considered')} samples.",
+            "message": f"Score={sentiment.get('sentiment_score')} from {sentiment.get('samples_considered')} items.",
         },
         {
             "timestamp": now,
             "agent": "Risk Manager",
-            "message": f"VaR {risk.get('value_at_risk_95')} | RR {risk.get('risk_reward_ratio')} | SL {risk.get('stop_loss')} | TP {risk.get('take_profit')}",
+            "message": f"VaR={risk.get('value_at_risk_95')} RR={risk.get('risk_reward_ratio')} SL={risk.get('stop_loss')} TP={risk.get('take_profit')}",
         },
         {
             "timestamp": now,
             "agent": "Chief Synthesizer",
-            "message": f"Signal {synthesis.get('signal')} at {synthesis.get('win_probability')}% probability.",
+            "message": f"{synthesis.get('signal')} at {synthesis.get('win_probability')}% ({synthesis.get('historical_wins')}/{synthesis.get('historical_matches')})",
         },
     ]
 
 
-def build_dashboard_snapshot(symbol: str, quote_payload: Dict[str, Any], news_payload: Dict[str, Any]) -> Dict[str, Any]:
-    quote = quote_payload.get("stock", {}) if isinstance(quote_payload, dict) else {}
-    last_price = _to_float(quote.get("last_price"), fallback=0.0)
-    previous_close = _to_float(quote.get("previous_close"), fallback=last_price or 100.0)
-    candles = generate_candles(symbol=symbol, last_price=last_price, previous_close=previous_close, points=120)
-
+def build_dashboard_snapshot(
+    symbol: str,
+    quote_payload: Dict[str, Any],
+    news_payload: Dict[str, Any],
+    scenario_store: ScenarioStore,
+    nse_raw_fetcher: Optional[Any] = None,
+    lookback_points: int = 240,
+) -> Dict[str, Any]:
+    candles = _fetch_live_candles(
+        symbol=symbol,
+        nse_raw_fetcher=nse_raw_fetcher,
+        lookback_points=lookback_points,
+    )
     technical = technical_agent(symbol=symbol, candles=candles)
     sentiment = sentiment_agent(symbol=symbol, news_payload=news_payload)
     risk = risk_agent(symbol=symbol, candles=candles, technical=technical)
-    synthesis = synthesizer_agent(symbol=symbol, technical=technical, sentiment=sentiment, risk=risk)
-    brain_log = build_brain_log(technical=technical, sentiment=sentiment, risk=risk, synthesis=synthesis)
+    synthesis = synthesizer_agent(
+        symbol=symbol,
+        technical=technical,
+        sentiment=sentiment,
+        risk=risk,
+        scenario_store=scenario_store,
+    )
+
+    market = quote_payload.get("stock", {}) if isinstance(quote_payload, dict) else {}
+    current_price = _to_float(market.get("last_price"), fallback=candles[-1]["close"] if candles else 0.0)
+    previous_close = _to_float(market.get("previous_close"), fallback=current_price)
+    prediction_id = scenario_store.register_prediction(
+        scenario_key=synthesis.get("scenario_key", "unknown"),
+        symbol=symbol.upper(),
+        entry_price=current_price,
+    )
 
     return {
         "symbol": symbol.upper(),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "prediction_id": prediction_id,
         "market": {
-            "current_price": round(last_price or candles[-1]["close"], 2),
+            "current_price": round(current_price, 2),
             "previous_close": round(previous_close, 2),
             "candles": candles,
-            "news": news_payload.get("items", [])[:20] if isinstance(news_payload, dict) else [],
+            "news": news_payload.get("items", [])[:30] if isinstance(news_payload, dict) else [],
         },
         "agents": {
             "technical": technical,
@@ -424,5 +439,5 @@ def build_dashboard_snapshot(symbol: str, quote_payload: Dict[str, Any], news_pa
             "risk": risk,
             "synthesizer": synthesis,
         },
-        "brain_log": brain_log,
+        "brain_log": build_brain_log(technical=technical, sentiment=sentiment, risk=risk, synthesis=synthesis),
     }

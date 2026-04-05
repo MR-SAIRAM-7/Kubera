@@ -1,13 +1,13 @@
 ## Kubera Autonomous Market AI Dashboard
 
-This app now exposes a production-oriented multi-agent market dashboard pipeline for equities (for example `ADANIENT`).
+This app exposes a production-oriented multi-agent market dashboard pipeline for equities (for example `ADANIENT`).
 
 ### Architecture
 
-- **Technical Analyst Agent**: derives trend/pattern context from generated intraday candles and indicator set (SMA, RSI, MACD, support/resistance).
+- **Technical Analyst Agent**: derives trend/pattern context from live NSE candles and indicator set (SMA, RSI, MACD, support/resistance).
 - **Sentiment Analyst Agent**: scores latest market news sentiment (`-100` to `+100`) and detects potential alpha events.
 - **Risk Manager Agent**: computes volatility, VaR(95), stop-loss/take-profit, and risk-reward quality.
-- **Chief Synthesizer Agent**: combines all agent outputs and computes final signal + mathematically grounded win probability from historical scenario retrieval.
+- **Chief Synthesizer Agent**: combines all agent outputs and computes final signal + mathematically grounded win probability from continuously learned real outcomes.
 
 ### API
 
@@ -23,6 +23,15 @@ Returns a full dashboard snapshot:
 Query params:
 
 - `news_limit` (optional, default `25`, range `5-100`)
+
+#### `POST /api/dashboard/predictions/resolve`
+
+Persists live outcome feedback to continuously improve probability calibration.
+
+Request body:
+
+- `prediction_id` (from `GET /api/dashboard/{symbol}`)
+- `exit_price` (real realized price)
 
 ### Environment
 
