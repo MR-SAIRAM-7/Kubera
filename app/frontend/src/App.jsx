@@ -26,6 +26,7 @@ const statusTone = (value, positive = true) => {
 
 const cardClassName =
   "border border-[#27272A] bg-[#121214] p-4 transition-colors duration-200 hover:border-[#3F3F46]";
+const MotionArticle = motion.article;
 
 const ChartPanel = ({ candles }) => {
   useEffect(() => {
@@ -90,7 +91,7 @@ const BrainPanel = ({ logs }) => {
       </div>
       <div className="flex-1 space-y-2 overflow-y-auto p-3 font-mono text-xs">
         {logs?.map((entry, index) => (
-          <motion.article
+          <MotionArticle
             key={`${entry.timestamp}-${entry.agent}-${index}`}
             initial={{ opacity: 0.3 }}
             animate={{ opacity: 1 }}
@@ -99,7 +100,7 @@ const BrainPanel = ({ logs }) => {
           >
             <p className="mb-1 text-[10px] uppercase tracking-[0.2em] text-[#71717A]">{entry.agent}</p>
             <p className="leading-relaxed text-[#E4E4E7]">{entry.message}</p>
-          </motion.article>
+          </MotionArticle>
         ))}
       </div>
     </aside>
