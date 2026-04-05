@@ -14,11 +14,13 @@ try:
     from .NSE.nseScraper import NSEScraper
     from .BSE.bseScraper import BSEScraper
     from .social.getNews import NewsScraper
+    from .agents import build_dashboard_snapshot
 except ImportError:
     # Fallback for running as a script from backend working directory.
     from NSE.nseScraper import NSEScraper
     from BSE.bseScraper import BSEScraper
     from social.getNews import NewsScraper
+    from agents import build_dashboard_snapshot
 
 
 ROOT_DIR = Path(__file__).parent
@@ -141,6 +143,20 @@ async def get_stock_news(stock_query: str, limit: int = Query(default=20, ge=1, 
         logger.exception("News scraping failed for %s", stock_query)
         raise HTTPException(status_code=502, detail=f"News scraping failed: {exc}") from exc
 
+
+@api_router.get("/dashboard/{symbol}")
+async def get_autonomous_dashboard(symbol: str, news_limit: int = Query(default=25, ge=5, le=100)):
+    try:
+        nse_scraper = NSEScraper()
+        news_scraper = NewsScraper()
+
+        market_data = nse_scraper.get_stock_and_market_overview(symbol=symbol, filings_limit=10)
+        news_data = news_scraper.get_latest_related_news(stock_query=symbol, limit=news_limit)
+        return build_dashboard_snapshot(symbol=symbol, quote_payload=market_data, news_payload=news_data)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Dashboard synthesis failed for %s", symbol)
+        raise HTTPException(status_code=502, detail=f"Dashboard synthesis failed: {exc}") from exc
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -156,4 +172,3 @@ app.add_middleware(
 async def shutdown_db_client():
     if client is not None:
         client.close()
-
