@@ -200,6 +200,14 @@ NEGATIVE_WORDS = {
     "lawsuit",
 }
 
+RISK_ACCEPTABLE_MIN_RR = 1.5
+RISK_ACCEPTABLE_MAX_VOLATILITY = 0.03
+LOW_VOLATILITY_THRESHOLD = 0.02
+POSITION_SIZE_HIGH = 2.0
+POSITION_SIZE_MEDIUM = 1.0
+POSITION_SIZE_LOW = 0.5
+POSITION_SIZE_MEDIUM_MIN_RR = 1.2
+
 
 def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]:
     items = news_payload.get("items", []) if isinstance(news_payload, dict) else []
@@ -253,7 +261,17 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
         take_profit = price + atr * 1.4
 
     rr = abs(take_profit - price) / max(abs(price - stop_loss), 0.0001)
-    risk_state = "acceptable" if rr >= 1.5 and volatility < 0.03 else "elevated"
+    risk_state = "acceptable" if rr >= RISK_ACCEPTABLE_MIN_RR and volatility < RISK_ACCEPTABLE_MAX_VOLATILITY else "elevated"
+    position_size_pct = (
+        POSITION_SIZE_HIGH
+        if risk_state == "acceptable" and volatility < LOW_VOLATILITY_THRESHOLD
+        else (POSITION_SIZE_MEDIUM if rr >= POSITION_SIZE_MEDIUM_MIN_RR else POSITION_SIZE_LOW)
+    )
+    risk_warning = (
+        "Risk is controlled for standard position sizing."
+        if risk_state == "acceptable"
+        else "Elevated volatility or weak RR; reduce size or wait for clearer setup."
+    )
 
     return {
         "agent": "risk",
@@ -264,6 +282,8 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
         "take_profit": round(take_profit, 2),
         "risk_reward_ratio": round(rr, 2),
         "risk_state": risk_state,
+        "position_size_pct": round(position_size_pct, 2),
+        "risk_warning": risk_warning,
         "confidence": 0.58 if risk_state == "acceptable" else 0.42,
     }
 
@@ -345,6 +365,9 @@ def synthesizer_agent(
     model_probability = 50 + technical_signal * 16 + sentiment_signal * 18
     final_probability = (empirical_probability * 0.7 + model_probability * 0.3) if total > 0 else model_probability
     final_probability = max(5.0, min(95.0, final_probability * risk_multiplier))
+    # Alignment strength between technical (-1/0/1) and sentiment (-1..1), normalized to [0, 1].
+    consensus_score = abs(technical_signal + sentiment_signal) / 2
+    confidence_band = "high" if final_probability >= 68 else ("medium" if final_probability >= 53 else "low")
 
     if final_probability >= 60 and risk.get("risk_reward_ratio", 0) >= 1.5:
         signal = "BUY"
@@ -366,6 +389,8 @@ def synthesizer_agent(
         "symbol": symbol,
         "signal": signal,
         "win_probability": round(final_probability, 2),
+        "consensus_score": round(consensus_score, 2),
+        "confidence_band": confidence_band,
         "historical_wins": wins,
         "historical_matches": total,
         "scenario_key": scenario_key,
@@ -394,7 +419,11 @@ def build_brain_log(
         {
             "timestamp": now,
             "agent": "Risk Manager",
-            "message": f"VaR={risk.get('value_at_risk_95')} RR={risk.get('risk_reward_ratio')} SL={risk.get('stop_loss')} TP={risk.get('take_profit')}",
+            "message": (
+                f"VaR={risk.get('value_at_risk_95')} RR={risk.get('risk_reward_ratio')} "
+                f"SL={risk.get('stop_loss')} TP={risk.get('take_profit')} "
+                f"Size={risk.get('position_size_pct')}%"
+            ),
         },
         {
             "timestamp": now,
