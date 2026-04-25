@@ -86,7 +86,10 @@ def _parse_cors_origins(raw: str) -> List[str]:
         stripped_origin = origin.strip()
         if stripped_origin:
             origins.append(stripped_origin)
-    return origins or ["*"]
+    if origins:
+        return origins
+    logger.warning("CORS_ORIGINS is empty. Falling back to wildcard '*'.")
+    return ["*"]
 
 
 cors_origins = _parse_cors_origins(os.environ.get("CORS_ORIGINS", "*"))
