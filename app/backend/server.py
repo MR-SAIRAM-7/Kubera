@@ -4,9 +4,11 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import re
+import time
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from typing import Any, Dict, List, Optional
 import uuid
 from datetime import datetime, timezone
 
@@ -53,6 +55,53 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 scenario_store = ScenarioStore(max_samples_per_scenario=500)
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9._-]{1,25}$")
+
+
+class TTLCache:
+    def __init__(self, ttl_seconds: int = 45, max_items: int = 256):
+        self.ttl_seconds = ttl_seconds
+        self.max_items = max_items
+        self._store: Dict[str, Dict[str, Any]] = {}
+
+    def get(self, key: str, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
+        item = self._store.get(key)
+        if item is None:
+            return None
+        now = time.time()
+        if item["expires_at"] > now:
+            return {"value": item["value"], "stale": False}
+        if allow_stale:
+            return {"value": item["value"], "stale": True}
+        self._store.pop(key, None)
+        return None
+
+    def set(self, key: str, value: Dict[str, Any]) -> None:
+        if len(self._store) >= self.max_items:
+            oldest_key = min(self._store, key=lambda entry: self._store[entry]["created_at"])
+            self._store.pop(oldest_key, None)
+        now = time.time()
+        self._store[key] = {
+            "value": value,
+            "created_at": now,
+            "expires_at": now + self.ttl_seconds,
+        }
+
+
+dashboard_cache = TTLCache(
+    ttl_seconds=int(os.environ.get("DASHBOARD_CACHE_TTL_SECONDS", "45")),
+    max_items=int(os.environ.get("DASHBOARD_CACHE_MAX_ITEMS", "256")),
+)
+
+
+def _normalize_symbol(symbol: str) -> str:
+    normalized = symbol.strip().upper()
+    if not normalized or not SYMBOL_PATTERN.match(normalized):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid symbol. Use alphanumeric ticker characters (A-Z, 0-9, . _ -).",
+        )
+    return normalized
 
 
 # Define Models
@@ -70,6 +119,21 @@ class StatusCheckCreate(BaseModel):
 @api_router.get("/")
 async def root():
     return {"message": "Hello World"}
+
+
+@api_router.get("/health/live")
+async def liveness():
+    return {"status": "ok", "service": "kubera-backend"}
+
+
+@api_router.get("/health/ready")
+async def readiness():
+    return {
+        "status": "ok",
+        "mongo_configured": bool(mongo_url and db_name),
+        "cache_items": len(dashboard_cache._store),
+    }
+
 
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
@@ -146,13 +210,26 @@ async def get_stock_news(stock_query: str, limit: int = Query(default=20, ge=1, 
 
 
 @api_router.get("/dashboard/{symbol}")
-async def get_autonomous_dashboard(symbol: str, news_limit: int = Query(default=25, ge=5, le=100)):
+async def get_autonomous_dashboard(
+    symbol: str,
+    news_limit: int = Query(default=25, ge=5, le=100),
+    force_refresh: bool = Query(default=False),
+):
+    normalized_symbol = _normalize_symbol(symbol)
+    cache_key = f"{normalized_symbol}:{news_limit}"
+    if not force_refresh:
+        cached = dashboard_cache.get(cache_key)
+        if cached is not None:
+            payload = dict(cached["value"])
+            payload["cache"] = {"hit": True, "stale": False}
+            return payload
+
     try:
         nse_scraper = NSEScraper()
         news_scraper = NewsScraper()
 
-        market_data = nse_scraper.get_stock_and_market_overview(symbol=symbol, filings_limit=10)
-        news_data = news_scraper.get_latest_related_news(stock_query=symbol, limit=news_limit)
+        market_data = nse_scraper.get_stock_and_market_overview(symbol=normalized_symbol, filings_limit=10)
+        news_data = news_scraper.get_latest_related_news(stock_query=normalized_symbol, limit=news_limit)
         def nse_live_candle_fetcher(path: str, ticker: str):
             upper = ticker.upper().strip()
             if path == "/api/chart-databyindex":
@@ -170,16 +247,26 @@ async def get_autonomous_dashboard(symbol: str, news_limit: int = Query(default=
                 return nse_scraper.get_any_data(path, params={"symbol": upper, "series": ["EQ"]})
             return None
 
-        return build_dashboard_snapshot(
-            symbol=symbol,
+        snapshot = build_dashboard_snapshot(
+            symbol=normalized_symbol,
             quote_payload=market_data,
             news_payload=news_data,
             scenario_store=scenario_store,
             nse_raw_fetcher=nse_live_candle_fetcher,
             lookback_points=240,
         )
+        dashboard_cache.set(cache_key, snapshot)
+        payload = dict(snapshot)
+        payload["cache"] = {"hit": False, "stale": False}
+        return payload
     except Exception:  # noqa: BLE001
-        logger.exception("Dashboard synthesis failed for %s", symbol)
+        logger.exception("Dashboard synthesis failed for %s", normalized_symbol)
+        stale = dashboard_cache.get(cache_key, allow_stale=True)
+        if stale is not None:
+            payload = dict(stale["value"])
+            payload["cache"] = {"hit": True, "stale": True}
+            payload["warning"] = "Live source unavailable. Showing cached snapshot."
+            return payload
         raise HTTPException(
             status_code=502,
             detail="Dashboard synthesis failed. Live data source is unavailable for the requested symbol.",

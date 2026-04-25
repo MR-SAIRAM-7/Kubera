@@ -5,7 +5,13 @@ import { motion } from "framer-motion";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
-const REFRESH_INTERVAL_MS = 120000;
+const DEFAULT_REFRESH_INTERVAL_MS = 120000;
+const REFRESH_OPTIONS = [
+  { label: "30s", value: 30000 },
+  { label: "1m", value: 60000 },
+  { label: "2m", value: 120000 },
+  { label: "5m", value: 300000 },
+];
 
 const agentStyles = {
   "Technical Analyst": "border-l-[#22D3EE] text-[#22D3EE]",
@@ -28,7 +34,7 @@ const cardClassName =
   "border border-[#27272A] bg-[#121214] p-4 transition-colors duration-200 hover:border-[#3F3F46]";
 const MotionArticle = motion.article;
 
-const ChartPanel = ({ candles }) => {
+const ChartPanel = ({ candles, technical, risk }) => {
   useEffect(() => {
     const container = document.getElementById("price-chart-container");
     if (!container || !candles?.length) return;
@@ -62,6 +68,26 @@ const ChartPanel = ({ candles }) => {
       })),
     );
 
+    const latestTime = candles[candles.length - 1]?.t;
+    const support = technical?.indicators?.support;
+    const resistance = technical?.indicators?.resistance;
+    const stopLoss = risk?.stop_loss;
+    const takeProfit = risk?.take_profit;
+
+    const addGuideLine = (price, color) => {
+      if (!Number.isFinite(price)) return;
+      const line = chart.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+      line.setData([
+        { time: candles[0].t, value: price },
+        { time: latestTime, value: price },
+      ]);
+    };
+
+    addGuideLine(support, "#10B981");
+    addGuideLine(resistance, "#F59E0B");
+    addGuideLine(stopLoss, "#EF4444");
+    addGuideLine(takeProfit, "#22D3EE");
+
     const handleResize = () => {
       chart.resize(container.clientWidth, 460);
     };
@@ -70,7 +96,7 @@ const ChartPanel = ({ candles }) => {
       window.removeEventListener("resize", handleResize);
       chart.remove();
     };
-  }, [candles]);
+  }, [candles, risk?.stop_loss, risk?.take_profit, technical?.indicators?.resistance, technical?.indicators?.support]);
 
   return (
     <section className="col-span-12 border border-[#27272A] bg-[#121214] p-3 lg:col-span-8">
@@ -163,6 +189,7 @@ const DashboardPage = () => {
   const [snapshot, setSnapshot] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [refreshIntervalMs, setRefreshIntervalMs] = useState(DEFAULT_REFRESH_INTERVAL_MS);
 
   const fetchSnapshot = async (symbolValue) => {
     setLoading(true);
@@ -179,13 +206,14 @@ const DashboardPage = () => {
 
   useEffect(() => {
     fetchSnapshot(symbol);
-    const timer = setInterval(() => fetchSnapshot(symbol), REFRESH_INTERVAL_MS);
+    const timer = setInterval(() => fetchSnapshot(symbol), refreshIntervalMs);
     return () => clearInterval(timer);
-  }, [symbol]);
+  }, [refreshIntervalMs, symbol]);
 
   const synthesized = snapshot?.agents?.synthesizer;
   const risk = snapshot?.agents?.risk;
   const sentiment = snapshot?.agents?.sentiment;
+  const technical = snapshot?.agents?.technical;
   const market = snapshot?.market;
   const cards = useMemo(
     () => [
@@ -218,8 +246,20 @@ const DashboardPage = () => {
         value: risk?.risk_reward_ratio ?? "-",
         toneClass: risk?.risk_reward_ratio >= 1.6 ? "text-[#10B981]" : "text-[#F59E0B]",
       },
+      {
+        testId: "consensus-card",
+        label: "Consensus",
+        value: synthesized?.consensus_score ?? "-",
+        toneClass: synthesized?.consensus_score >= 0.45 ? "text-[#10B981]" : "text-[#F59E0B]",
+      },
     ],
-    [risk?.risk_reward_ratio, sentiment?.sentiment_score, synthesized?.signal, synthesized?.win_probability],
+    [
+      risk?.risk_reward_ratio,
+      sentiment?.sentiment_score,
+      synthesized?.consensus_score,
+      synthesized?.signal,
+      synthesized?.win_probability,
+    ],
   );
 
   return (
@@ -227,7 +267,7 @@ const DashboardPage = () => {
       <div className="pointer-events-none fixed inset-0 opacity-[0.02] [background-image:radial-gradient(#fff_1px,transparent_1px)] [background-size:3px_3px]" />
 
       <header className="relative z-10 border border-[#27272A] bg-[#121214] p-4">
-        <div className="grid gap-3 lg:grid-cols-3 lg:items-center">
+        <div className="grid gap-3 lg:grid-cols-4 lg:items-center">
           <div className="text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Kubera Autonomous Market AI</div>
           <form
             className="flex items-center gap-2"
@@ -253,7 +293,27 @@ const DashboardPage = () => {
             </button>
           </form>
           <div className="text-right text-xs text-[#A1A1AA]">
-            {loading ? "Refreshing..." : `Live every ${REFRESH_INTERVAL_MS / 1000}s`} · {symbol}
+            {loading ? "Refreshing..." : `Live every ${refreshIntervalMs / 1000}s`} · {symbol}
+          </div>
+          <div className="flex items-center justify-end gap-2 text-xs text-[#A1A1AA]">
+            <select
+              value={refreshIntervalMs}
+              onChange={(event) => setRefreshIntervalMs(Number(event.target.value))}
+              className="border border-[#27272A] bg-[#0A0A0B] px-2 py-2 text-xs"
+            >
+              {REFRESH_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="border border-[#22D3EE] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#22D3EE]"
+              onClick={() => fetchSnapshot(symbol)}
+            >
+              Refresh
+            </button>
           </div>
         </div>
       </header>
@@ -263,13 +323,13 @@ const DashboardPage = () => {
       ) : null}
 
       <main className="relative z-10 mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
-        <section className="col-span-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-8 lg:grid-cols-4">
+        <section className="col-span-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-8 lg:grid-cols-5">
           {cards.map((card) => (
             <MetricCard key={card.testId} {...card} />
           ))}
         </section>
         <BrainPanel logs={snapshot?.brain_log ?? []} />
-        <ChartPanel candles={market?.candles ?? []} />
+        <ChartPanel candles={market?.candles ?? []} risk={risk} technical={technical} />
         <NewsFeed newsItems={market?.news ?? []} />
         <BacktestPanel synthesis={synthesized} />
         <section className={`${cardClassName} col-span-12 lg:col-span-8`}>
@@ -290,7 +350,11 @@ const DashboardPage = () => {
             <p>
               VaR 95%: <span className="ml-2 font-semibold text-[#F59E0B]">{risk?.value_at_risk_95 ?? "-"}</span>
             </p>
+            <p>
+              Position Size: <span className="ml-2 font-semibold text-[#22D3EE]">{risk?.position_size_pct ?? "-"}%</span>
+            </p>
           </div>
+          <p className="mt-3 text-xs text-[#A1A1AA]">{risk?.risk_warning ?? "Risk guidance unavailable."}</p>
         </section>
       </main>
     </div>
