@@ -73,6 +73,25 @@ KAFKA_TOPIC_REPLICATION_FACTOR = int(os.environ.get("KAFKA_TOPIC_REPLICATION_FAC
 WS_STREAM_INTERVAL = int(os.environ.get("WS_STREAM_INTERVAL_SECONDS", "5"))
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_cors_origins(raw: str) -> List[str]:
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["*"]
+
+
+cors_origins = _parse_cors_origins(os.environ.get("CORS_ORIGINS", "*"))
+cors_allow_credentials = _env_bool("CORS_ALLOW_CREDENTIALS", default=False)
+if "*" in cors_origins and cors_allow_credentials:
+    logger.warning("CORS_ALLOW_CREDENTIALS=true is incompatible with CORS_ORIGINS='*'. Falling back to false.")
+    cors_allow_credentials = False
+
+
 class TTLCache:
     def __init__(self, ttl_seconds: int = 45, max_items: int = 256):
         self.ttl_seconds = ttl_seconds
@@ -481,8 +500,8 @@ async def dashboard_websocket(websocket: WebSocket, symbol: str, news_limit: int
 app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_credentials=cors_allow_credentials,
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

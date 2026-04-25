@@ -38,6 +38,7 @@ Request body:
 Frontend:
 
 - `VITE_BACKEND_URL` (example: `http://localhost:8000`)
+  - defaults to `http://localhost:8000` in dev and current origin in production when unset
 
 Backend:
 
@@ -46,6 +47,12 @@ Backend:
   - `DB_NAME`
 - Optional CORS:
   - `CORS_ORIGINS` (comma-separated)
+  - `CORS_ALLOW_CREDENTIALS` (default `false`; should stay `false` when using wildcard origins)
+
+Environment templates:
+
+- `app/backend/.env.example`
+- `app/frontend/.env.example`
 
 ### Run
 
