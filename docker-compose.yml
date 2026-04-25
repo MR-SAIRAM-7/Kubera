@@ -1,0 +1,54 @@
+services:
+  backend:
+    build:
+      context: ./app/backend
+      dockerfile: Dockerfile
+    container_name: kubera-backend
+    environment:
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173}
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - KAFKA_TOPIC_PARTITIONS=${KAFKA_TOPIC_PARTITIONS:-3}
+      - KAFKA_TOPIC_REPLICATION_FACTOR=${KAFKA_TOPIC_REPLICATION_FACTOR:-1}
+      - WS_STREAM_INTERVAL_SECONDS=5
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - DASHBOARD_CACHE_TTL_SECONDS=45
+      - DASHBOARD_CACHE_MAX_ITEMS=256
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redpanda
+      - timescaledb
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.12
+    container_name: kubera-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: kubera-timescaledb
+    environment:
+      - POSTGRES_DB=kubera
+      - POSTGRES_USER=kubera
+      - POSTGRES_PASSWORD=kubera
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+
+volumes:
+  timescale-data:

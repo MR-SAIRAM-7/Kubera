@@ -1,86 +1,59 @@
-# Kubera — Autonomous Market AI Dashboard
+# Kubera — Institutional Multi-Agent Autonomous Trading Dashboard
 
-Kubera is a multi-agent market intelligence dashboard for equities (for example `NSE: ADANIENT`) built with:
+Institutional-grade autonomous market intelligence stack with:
 
-- **Backend:** FastAPI (Python)
-- **Frontend:** React + Vite + Tailwind + Lightweight Charts
-- **Core model:** Multi-agent synthesis (Technical + Sentiment + Risk + Chief Synthesizer)
-
-It is designed to provide **explainable** trade signals, risk controls, and continuously calibrated probabilities.
-
----
-
-## 1) Product Vision
-
-Kubera acts like a virtual trading desk with specialized agents:
-
-1. **Technical Analyst Agent**
-   - Ingests candles and computes trend/pattern context
-   - Uses SMA, RSI, MACD, support/resistance and momentum
-2. **Sentiment Analyst Agent**
-   - Aggregates and ranks market/news feed items
-   - Scores sentiment in `[-100, +100]`
-3. **Risk Manager Agent**
-   - Computes volatility, VaR(95), SL/TP, risk:reward
-   - Adds risk warning + suggested position sizing
-4. **Chief Synthesizer Agent**
-   - Combines all signals into BUY/SELL/HOLD
-   - Produces probability + confidence band + justification
-   - Uses empirical scenario outcomes for calibration
+- **FastAPI backend** with **LangGraph** multi-agent orchestration
+- **React dashboard** with realtime **WebSocket** streaming + Lightweight Charts
+- **Dynamic ticker workflows** with Kafka-topic provisioning support
+- **Continuous vectorized backtesting** and Bayesian win-probability
+- **Paper trading engine** + Discord/Telegram realtime signal alerts
 
 ---
 
-## 2) Repository Structure
+## Architecture Diagram
 
-```text
-Kubera/
-├── app/
-│   ├── backend/
-│   │   ├── server.py                # FastAPI routes and orchestration
-│   │   ├── agents.py                # Multi-agent logic and scenario store
-│   │   ├── NSE/nseScraper.py        # NSE market data client
-│   │   ├── BSE/bseScraper.py        # BSE market data client
-│   │   └── social/getNews.py        # News/sentiment feed collector
-│   ├── frontend/
-│   │   ├── src/App.jsx              # Dashboard UI
-│   │   └── package.json
-│   └── README.md
-└── README.md
+```mermaid
+flowchart LR
+  UI[React Dashboard] -->|WebSocket + REST| API[FastAPI Orchestrator]
+  API --> LG[LangGraph State Graph]
+  LG --> A1[Agent 1: Technical Quant]
+  LG --> A2[Agent 2: Fundamental + Sentiment]
+  LG --> A3[Agent 3: Risk Manager]
+  LG --> A4[Agent 4: Chief Synthesizer]
+  A1 --> TS[(TimescaleDB / Tick Store)]
+  A2 --> NF[News + Social Firehose]
+  A4 --> VS[(Vector Similarity Store)]
+  A4 --> PT[Paper Trading Engine]
+  API --> RP[Redpanda/Kafka]
+  API --> AL[Alert Dispatcher<br/>Telegram/Discord]
 ```
 
 ---
 
-## 3) Production-Ready Features Included
-
-- Multi-agent signal architecture with explainability (`brain_log`)
-- Empirical scenario memory with win-rate calibration
-- Dynamic risk controls (VaR, SL/TP, RR, position size guidance)
-- Resilient market/news scraping with retries and fallbacks
-- Backend **health endpoints** for liveness/readiness
-- Dashboard response cache with stale fallback during upstream outages
-- Symbol validation and safer API input handling
-- Real-time UI refresh controls and manual refresh
-- Chart overlays for support/resistance + SL/TP guides
-
----
-
-## 4) Quick Start
-
-### 4.1 Prerequisites
+## Prerequisites
 
 - Python 3.11+
 - Node.js 20+
 - npm 10+
+- Docker + Docker Compose (recommended for full stack infra)
 
-### 4.2 Backend
+---
+
+## Local Setup
+
+### 1) Infra + Backend (Docker)
 
 ```bash
-cd app/backend
-python -m pip install -r requirements.txt
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+docker compose up --build
 ```
 
-### 4.3 Frontend
+Services:
+
+- Backend: `http://localhost:8000`
+- Redpanda/Kafka: `localhost:9092`
+- TimescaleDB: `localhost:5432`
+
+### 2) Frontend (local)
 
 ```bash
 cd app/frontend
@@ -88,27 +61,34 @@ npm ci
 npm run dev
 ```
 
-Open: `http://localhost:5173`
+Frontend runs at `http://localhost:5173`.
 
 ---
 
-## 5) Environment Variables
+## Environment Variables
 
 ### Backend
 
-- `MONGO_URL` (optional)
-- `DB_NAME` (optional)
-- `CORS_ORIGINS` (optional, comma-separated; default `*`)
-- `DASHBOARD_CACHE_TTL_SECONDS` (optional, default `45`)
-- `DASHBOARD_CACHE_MAX_ITEMS` (optional, default `256`)
+- `CORS_ORIGINS` (default `*`)
+- `DASHBOARD_CACHE_TTL_SECONDS` (default `45`)
+- `DASHBOARD_CACHE_MAX_ITEMS` (default `256`)
+- `KAFKA_BOOTSTRAP_SERVERS` (default `localhost:9092`)
+- `WS_STREAM_INTERVAL_SECONDS` (default `5`)
+- `MONGO_URL` *(optional)*
+- `DB_NAME` *(optional)*
+- `TELEGRAM_BOT_TOKEN` *(optional for push alerts)*
+- `TELEGRAM_CHAT_ID` *(optional for push alerts)*
+- `DISCORD_WEBHOOK_URL` *(optional for push alerts)*
+- `OPENAI_API_KEY` *(optional, reserved for future LLM extensions)*
+- `PINECONE_API_KEY` *(optional, reserved for external vector-db integration)*
 
 ### Frontend
 
-- `VITE_BACKEND_URL` (optional, default `http://localhost:8000`)
+- `VITE_BACKEND_URL` (default `http://localhost:8000`)
 
 ---
 
-## 6) API Reference
+## API Endpoints
 
 Base URL: `http://localhost:8000/api`
 
@@ -117,68 +97,83 @@ Base URL: `http://localhost:8000/api`
 - `GET /health/live`
 - `GET /health/ready`
 
-### Dashboard
+### Dashboard + MAS
 
 - `GET /dashboard/{symbol}`
-  - Query:
-    - `news_limit` (`5..100`, default `25`)
-    - `force_refresh` (`true|false`, default `false`)
+  - Query: `news_limit=5..100`, `force_refresh=true|false`
   - Returns:
-    - market candles/news
-    - all agent outputs
-    - final signal + win probability + justification
-    - brain panel logs
+    - market candles + overlays
+    - technical/sentiment/risk/synthesizer outputs
+    - `paper_trading` summary
+    - explainability `brain_log`
     - cache metadata
 
 - `POST /dashboard/predictions/resolve`
   - Body:
     ```json
-    {
-      "prediction_id": "p_1",
-      "exit_price": 3120.5
-    }
+    { "prediction_id": "p_1", "exit_price": 3120.5 }
     ```
 
-### Data Endpoints
+### Dynamic Tickers
+
+- `POST /subscriptions/{symbol}`  
+  Creates/returns dynamic workflow + Kafka topic mapping.
+
+- `GET /subscriptions`  
+  Lists active dynamic ticker workflows.
+
+### Paper Trading
+
+- `GET /paper-trading/{symbol}`
+
+### Market Data
 
 - `GET /market/nse/{symbol}`
 - `GET /market/nse/raw?api_path=/api/allIndices`
 - `GET /market/bse/{stock_query}`
 - `GET /news/{stock_query}?limit=20`
 
----
+### Realtime Stream
 
-## 7) Frontend UX Panels
-
-- **Signal cards:** Signal, Probability, Sentiment, RR, Consensus
-- **Price Action chart:** live candles + support/resistance + SL/TP guides
-- **Brain Panel:** real-time agent reasoning timeline
-- **Backtesting Reflection:** matched historical scenarios + wins
-- **Risk Controls:** SL, TP, VaR, position size, risk warning
+- `WS /ws/dashboard/{symbol}?news_limit=25`
 
 ---
 
-## 8) Operational Notes
+## Continuous Backtesting Mathematics
 
-- This system is a **decision-support tool**, not financial advice.
-- Upstream public data feeds may throttle/block traffic; stale cache fallback is enabled.
-- For institutional scale, plan migration to:
-  - stream bus (Kafka/Redpanda),
-  - time-series DB (TimescaleDB),
-  - vector store (Milvus/Pinecone),
-  - job orchestration and persistent backtesting services.
+1. **Confluence detection**  
+   Chief Synthesizer consumes:
+   - technical state (trend, RSI, MACD, Bollinger, support/resistance/order blocks)
+   - sentiment state (`-100..+100`)
+   - risk state (VaR, ATR, RR, veto)
+
+2. **Vectorization**  
+   Current setup is encoded into a dense feature vector:
+   - normalized RSI
+   - MACD/signal pair
+   - normalized sentiment
+   - volatility
+   - normalized RR
+   - trend one-hot flags
+
+3. **Similarity retrieval**  
+   Retrieve top-k nearest historical setup vectors (k=500 max).
+
+4. **Bayesian win probability**  
+   With Beta(1,1) prior and `wins` successful outcomes from `total` matches:
+
+   `P(win) = (wins + 1) / (total + 2)`
+
+   Output percentage = `P(win) * 100`.
+
+5. **Risk-aware final signal**  
+   - Risk manager enforces SL/TP and RR constraints.
+   - If RR < 1:2, risk veto forces `HOLD`.
+   - In degraded-news mode, confidence is reduced.
 
 ---
 
-## 9) Developer Commands
-
-Frontend:
-
-```bash
-cd app/frontend
-npm run lint
-npm run build
-```
+## Development Validation
 
 Backend:
 
@@ -187,19 +182,10 @@ cd app/backend
 python -m compileall .
 ```
 
----
+Frontend:
 
-## 10) Recommended Next Enhancements
-
-1. Persistent ScenarioStore (Redis/Postgres) for multi-instance deployments
-2. WebSocket/SSE push for sub-minute event updates
-3. Full audit trail for every signal decision
-4. Strategy sandbox + paper-trade ledger
-5. Alerting integrations (Telegram/Slack/Email)
-6. Portfolio-level risk netting and exposure guardrails
-
----
-
-## Disclaimer
-
-Kubera is for research and educational use. Markets are risky and uncertain. Always validate independently before live deployment.
+```bash
+cd app/frontend
+npm run lint
+npm run build
+```
