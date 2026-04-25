@@ -1,9 +1,258 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from math import sqrt
 from statistics import mean, pstdev
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple, TypedDict
+
+from langgraph.graph import END, StateGraph
+
+RISK_ACCEPTABLE_MIN_RR = 2.0
+RISK_ACCEPTABLE_MAX_VOLATILITY = 0.03
+LOW_VOLATILITY_THRESHOLD = 0.02
+POSITION_SIZE_HIGH = 2.0
+POSITION_SIZE_MEDIUM = 1.0
+POSITION_SIZE_LOW = 0.5
+POSITION_SIZE_MEDIUM_MIN_RR = 1.2
+
+POSITIVE_WORDS = {
+    "deal",
+    "growth",
+    "profit",
+    "beats",
+    "surge",
+    "contract",
+    "approval",
+    "bullish",
+    "record",
+    "expansion",
+    "upgrade",
+    "partnership",
+}
+NEGATIVE_WORDS = {
+    "probe",
+    "decline",
+    "loss",
+    "fraud",
+    "downgrade",
+    "penalty",
+    "volatility",
+    "bearish",
+    "delay",
+    "lawsuit",
+    "default",
+    "ban",
+}
+
+
+class MarketAgentState(TypedDict, total=False):
+    symbol: str
+    quote_payload: Dict[str, Any]
+    news_payload: Dict[str, Any]
+    candles: List[Dict[str, float]]
+    technical: Dict[str, Any]
+    sentiment: Dict[str, Any]
+    risk: Dict[str, Any]
+    synthesis: Dict[str, Any]
+    degraded_mode: bool
+    degrade_reasons: List[str]
+
+
+class ScenarioStore:
+    def __init__(self, max_samples_per_scenario: int = 500):
+        self.max_samples_per_scenario = max_samples_per_scenario
+        self.scenarios: Dict[str, Deque[bool]] = {}
+        self.pending_predictions: Dict[str, Dict[str, Any]] = {}
+        self._counter = 0
+
+    def register_prediction(
+        self,
+        scenario_key: str,
+        symbol: str,
+        entry_price: float,
+        signal: str,
+        stop_loss: float,
+        take_profit: float,
+    ) -> str:
+        self._counter += 1
+        prediction_id = f"p_{self._counter}"
+        self.pending_predictions[prediction_id] = {
+            "scenario_key": scenario_key,
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "signal": signal,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return prediction_id
+
+    def resolve_prediction(self, prediction_id: str, exit_price: float) -> Optional[Dict[str, Any]]:
+        prediction = self.pending_predictions.pop(prediction_id, None)
+        if prediction is None:
+            return None
+
+        scenario_key = prediction["scenario_key"]
+        signal = prediction.get("signal", "HOLD")
+        stop_loss = float(prediction.get("stop_loss", 0))
+        take_profit = float(prediction.get("take_profit", 0))
+
+        if signal == "BUY":
+            outcome_up = bool(exit_price >= take_profit) or bool(exit_price > prediction["entry_price"] and exit_price > stop_loss)
+        elif signal == "SELL":
+            outcome_up = bool(exit_price <= take_profit) or bool(exit_price < prediction["entry_price"] and exit_price < stop_loss)
+        else:
+            outcome_up = False
+
+        if scenario_key not in self.scenarios:
+            self.scenarios[scenario_key] = deque(maxlen=self.max_samples_per_scenario)
+        self.scenarios[scenario_key].append(outcome_up)
+
+        history = self.scenarios[scenario_key]
+        wins = sum(1 for outcome in history if outcome)
+        return {
+            "prediction_id": prediction_id,
+            "scenario_key": scenario_key,
+            "samples": len(history),
+            "wins": wins,
+            "win_probability": round((wins / len(history)) * 100, 2) if history else 50.0,
+        }
+
+
+class VectorBacktestStore:
+    """In-memory vector store with top-k cosine similarity search."""
+
+    def __init__(self, max_items_per_symbol: int = 2500):
+        self.max_items_per_symbol = max_items_per_symbol
+        self._vectors: Dict[str, Deque[Dict[str, Any]]] = defaultdict(lambda: deque(maxlen=self.max_items_per_symbol))
+
+    @staticmethod
+    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sqrt(sum(x * x for x in a))
+        norm_b = sqrt(sum(y * y for y in b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+    def add_setup(self, symbol: str, vector: List[float], metadata: Dict[str, Any], success: bool) -> None:
+        self._vectors[symbol.upper()].append(
+            {
+                "vector": vector,
+                "metadata": metadata,
+                "success": success,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def query_similar_setups(self, symbol: str, vector: List[float], top_k: int = 500) -> List[Dict[str, Any]]:
+        items = self._vectors.get(symbol.upper(), deque())
+        ranked = sorted(
+            (
+                {
+                    **row,
+                    "similarity": self._cosine_similarity(vector, row["vector"]),
+                }
+                for row in items
+            ),
+            key=lambda row: row["similarity"],
+            reverse=True,
+        )
+        return ranked[: max(1, top_k)]
+
+
+class PaperTradingEngine:
+    def __init__(self):
+        self.positions: Dict[str, Dict[str, Any]] = {}
+        self.closed_positions: List[Dict[str, Any]] = []
+
+    def execute_signal(
+        self,
+        symbol: str,
+        signal: str,
+        entry_price: float,
+        stop_loss: float,
+        take_profit: float,
+        probability: float,
+    ) -> Optional[Dict[str, Any]]:
+        symbol = symbol.upper()
+        if signal not in {"BUY", "SELL"}:
+            return None
+
+        position = {
+            "symbol": symbol,
+            "side": signal,
+            "entry_price": round(entry_price, 2),
+            "stop_loss": round(stop_loss, 2),
+            "take_profit": round(take_profit, 2),
+            "probability": round(probability, 2),
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "status": "OPEN",
+            "unrealized_pnl": 0.0,
+        }
+        self.positions[symbol] = position
+        return position
+
+    def mark_price(self, symbol: str, current_price: float) -> Optional[Dict[str, Any]]:
+        symbol = symbol.upper()
+        position = self.positions.get(symbol)
+        if not position:
+            return None
+
+        side = position["side"]
+        entry = float(position["entry_price"])
+        sl = float(position["stop_loss"])
+        tp = float(position["take_profit"])
+
+        if side == "BUY":
+            pnl = current_price - entry
+            hit_sl = current_price <= sl
+            hit_tp = current_price >= tp
+        else:
+            pnl = entry - current_price
+            hit_sl = current_price >= sl
+            hit_tp = current_price <= tp
+
+        position["unrealized_pnl"] = round(pnl, 2)
+
+        if hit_sl or hit_tp:
+            position["status"] = "CLOSED"
+            position["closed_at"] = datetime.now(timezone.utc).isoformat()
+            position["exit_price"] = round(current_price, 2)
+            position["realized_pnl"] = round(pnl, 2)
+            position["closure_reason"] = "TP" if hit_tp else "SL"
+            self.closed_positions.append(dict(position))
+            self.positions.pop(symbol, None)
+
+        return position
+
+    def get_summary(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        if symbol:
+            sym = symbol.upper()
+            open_pos = [self.positions[sym]] if sym in self.positions else []
+            closed = [row for row in self.closed_positions if row.get("symbol") == sym]
+        else:
+            open_pos = list(self.positions.values())
+            closed = list(self.closed_positions)
+
+        realized = sum(float(row.get("realized_pnl", 0.0)) for row in closed)
+        unrealized = sum(float(row.get("unrealized_pnl", 0.0)) for row in open_pos)
+        return {
+            "open_positions": open_pos,
+            "closed_positions": closed[-50:],
+            "realized_pnl": round(realized, 2),
+            "unrealized_pnl": round(unrealized, 2),
+            "total_trades": len(closed),
+            "win_rate": round(
+                (sum(1 for row in closed if float(row.get("realized_pnl", 0.0)) > 0) / len(closed)) * 100,
+                2,
+            )
+            if closed
+            else 0.0,
+        }
 
 
 def _to_float(value: Any, fallback: float = 0.0) -> float:
@@ -43,11 +292,7 @@ def _from_series_rows(rows: List[Dict[str, Any]], points: int = 240) -> List[Dic
     return candles
 
 
-def _fetch_live_candles(
-    symbol: str,
-    nse_raw_fetcher: Optional[Any] = None,
-    lookback_points: int = 240,
-) -> List[Dict[str, float]]:
+def _fetch_live_candles(symbol: str, nse_raw_fetcher: Optional[Any] = None, lookback_points: int = 240) -> List[Dict[str, float]]:
     if nse_raw_fetcher is None:
         raise ValueError("Live market data source is required")
 
@@ -127,6 +372,34 @@ def _rsi(closes: List[float], period: int = 14) -> float:
     return 100.0 - (100.0 / (1 + rs))
 
 
+def _bollinger(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Dict[str, float]:
+    window = closes[-period:] if len(closes) >= period else closes
+    mid = mean(window)
+    sd = pstdev(window) if len(window) > 1 else 0
+    return {
+        "middle": round(mid, 2),
+        "upper": round(mid + std_dev * sd, 2),
+        "lower": round(mid - std_dev * sd, 2),
+    }
+
+
+def _atr(candles: List[Dict[str, float]], period: int = 14) -> float:
+    if not candles:
+        return 0.0
+    selected = candles[-(period + 1) :]
+    tr_values: List[float] = []
+    prev_close = selected[0]["close"]
+    for row in selected[1:]:
+        tr = max(
+            row["high"] - row["low"],
+            abs(row["high"] - prev_close),
+            abs(row["low"] - prev_close),
+        )
+        tr_values.append(tr)
+        prev_close = row["close"]
+    return mean(tr_values) if tr_values else 0.0
+
+
 def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, Any]:
     closes = [row["close"] for row in candles]
     highs = [row["high"] for row in candles]
@@ -134,18 +407,24 @@ def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, A
 
     sma_20 = mean(closes[-20:]) if len(closes) >= 20 else mean(closes)
     sma_50 = mean(closes[-50:]) if len(closes) >= 50 else mean(closes)
+    ema_200 = _ema(closes[-240:] if len(closes) >= 240 else closes, 200)
     rsi_14 = _rsi(closes=closes, period=14)
     macd_values, macd = _macd_series(closes[-120:])
     signal_line = _ema(macd_values[-9:] if len(macd_values) >= 9 else macd_values, 9)
+    bollinger = _bollinger(closes)
+
     support = min(lows[-50:]) if len(lows) >= 50 else min(lows)
     resistance = max(highs[-50:]) if len(highs) >= 50 else max(highs)
     last_close = closes[-1]
+
     near_support = abs(last_close - support) / max(last_close, 1) <= 0.01
     near_resistance = abs(resistance - last_close) / max(last_close, 1) <= 0.01
-    momentum = closes[-1] - closes[-6] if len(closes) > 6 else 0.0
+    bullish_divergence = closes[-1] > closes[-5] and rsi_14 > 50
+    bearish_divergence = closes[-1] < closes[-5] and rsi_14 < 50
 
-    bullish_votes = int(sma_20 > sma_50) + int(macd > signal_line) + int(rsi_14 > 52) + int(momentum > 0) + int(near_support)
-    bearish_votes = int(sma_20 < sma_50) + int(macd < signal_line) + int(rsi_14 < 45) + int(momentum < 0) + int(near_resistance)
+    bullish_votes = int(sma_20 > sma_50) + int(macd > signal_line) + int(rsi_14 > 52) + int(near_support) + int(bullish_divergence)
+    bearish_votes = int(sma_20 < sma_50) + int(macd < signal_line) + int(rsi_14 < 45) + int(near_resistance) + int(bearish_divergence)
+
     if bullish_votes > bearish_votes:
         bias = "bullish"
     elif bearish_votes > bullish_votes:
@@ -154,59 +433,37 @@ def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, A
         bias = "neutral"
 
     confidence = round(min(0.96, max(0.1, 0.5 + (bullish_votes - bearish_votes) * 0.08)), 3)
-    pattern = "Demand retest" if near_support else ("Supply rejection" if near_resistance else "Trend continuation")
+
+    order_blocks = [
+        {
+            "type": "demand" if near_support else "supply",
+            "start_t": max(0, candles[-1]["t"] - 20),
+            "end_t": candles[-1]["t"],
+            "low": round(support * 0.997, 2) if near_support else round(resistance * 0.995, 2),
+            "high": round(support * 1.003, 2) if near_support else round(resistance * 1.005, 2),
+        }
+    ]
 
     return {
         "agent": "technical",
         "symbol": symbol,
         "bias": bias,
         "confidence": confidence,
-        "detected_pattern": pattern,
+        "detected_pattern": "Bullish divergence" if bullish_divergence else ("Bearish divergence" if bearish_divergence else "Trend continuation"),
+        "order_blocks": order_blocks,
         "indicators": {
             "sma_20": round(sma_20, 2),
             "sma_50": round(sma_50, 2),
+            "ema_200": round(ema_200, 2),
             "rsi_14": round(rsi_14, 2),
             "macd": round(macd, 4),
             "signal_line": round(signal_line, 4),
+            "bollinger": bollinger,
             "support": round(support, 2),
             "resistance": round(resistance, 2),
             "last_close": round(last_close, 2),
         },
     }
-
-
-POSITIVE_WORDS = {
-    "deal",
-    "growth",
-    "profit",
-    "beats",
-    "surge",
-    "contract",
-    "approval",
-    "bullish",
-    "record",
-    "expansion",
-}
-NEGATIVE_WORDS = {
-    "probe",
-    "decline",
-    "loss",
-    "fraud",
-    "downgrade",
-    "penalty",
-    "volatility",
-    "bearish",
-    "delay",
-    "lawsuit",
-}
-
-RISK_ACCEPTABLE_MIN_RR = 1.5
-RISK_ACCEPTABLE_MAX_VOLATILITY = 0.03
-LOW_VOLATILITY_THRESHOLD = 0.02
-POSITION_SIZE_HIGH = 2.0
-POSITION_SIZE_MEDIUM = 1.0
-POSITION_SIZE_LOW = 0.5
-POSITION_SIZE_MEDIUM_MIN_RR = 1.2
 
 
 def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -216,7 +473,7 @@ def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]
 
     score = 0
     alpha_signals: List[str] = []
-    for item in items[:80]:
+    for item in items[:100]:
         text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
         pos_hits = sum(1 for token in POSITIVE_WORDS if token in text)
         neg_hits = sum(1 for token in NEGATIVE_WORDS if token in text)
@@ -229,6 +486,9 @@ def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]
     bias = "bullish" if normalized > 15 else ("bearish" if normalized < -15 else "neutral")
     confidence = round(min(0.95, 0.45 + min(abs(normalized), 90) / 210), 3)
 
+    source_errors = news_payload.get("source_errors", []) if isinstance(news_payload, dict) else []
+    degraded = bool(source_errors and len(source_errors) >= 2)
+
     return {
         "agent": "sentiment",
         "symbol": symbol,
@@ -236,7 +496,9 @@ def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]
         "bias": bias,
         "confidence": confidence,
         "samples_considered": len(items),
-        "alpha_signals": alpha_signals[:5],
+        "alpha_signals": alpha_signals[:6],
+        "degraded": degraded,
+        "source_errors": source_errors,
     }
 
 
@@ -246,31 +508,26 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
     volatility = pstdev(returns) if len(returns) > 1 else 0.0
     price = closes[-1]
     var_95 = abs(price * volatility * 1.65)
-    true_ranges = [abs(row["high"] - row["low"]) for row in candles[-20:]] or [price * 0.01]
-    atr = mean(true_ranges)
+    atr = _atr(candles, period=14)
 
     bias = technical.get("bias", "neutral")
     if bias == "bullish":
         stop_loss = price - max(atr * 1.2, var_95 * 0.9)
-        take_profit = price + max(atr * 2.1, var_95 * 1.7)
+        take_profit = price + max(atr * 2.4, var_95 * 1.8)
     elif bias == "bearish":
         stop_loss = price + max(atr * 1.2, var_95 * 0.9)
-        take_profit = price - max(atr * 2.1, var_95 * 1.7)
+        take_profit = price - max(atr * 2.4, var_95 * 1.8)
     else:
         stop_loss = price - atr
-        take_profit = price + atr * 1.4
+        take_profit = price + atr * 1.5
 
     rr = abs(take_profit - price) / max(abs(price - stop_loss), 0.0001)
     risk_state = "acceptable" if rr >= RISK_ACCEPTABLE_MIN_RR and volatility < RISK_ACCEPTABLE_MAX_VOLATILITY else "elevated"
+    veto = rr < RISK_ACCEPTABLE_MIN_RR
     position_size_pct = (
         POSITION_SIZE_HIGH
         if risk_state == "acceptable" and volatility < LOW_VOLATILITY_THRESHOLD
         else (POSITION_SIZE_MEDIUM if rr >= POSITION_SIZE_MEDIUM_MIN_RR else POSITION_SIZE_LOW)
-    )
-    risk_warning = (
-        "Risk is controlled for standard position sizing."
-        if risk_state == "acceptable"
-        else "Elevated volatility or weak RR; reduce size or wait for clearer setup."
     )
 
     return {
@@ -278,13 +535,15 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
         "symbol": symbol,
         "volatility": round(volatility, 5),
         "value_at_risk_95": round(var_95, 2),
+        "atr_14": round(atr, 2),
         "stop_loss": round(stop_loss, 2),
         "take_profit": round(take_profit, 2),
         "risk_reward_ratio": round(rr, 2),
         "risk_state": risk_state,
         "position_size_pct": round(position_size_pct, 2),
-        "risk_warning": risk_warning,
-        "confidence": 0.58 if risk_state == "acceptable" else 0.42,
+        "veto": veto,
+        "confidence": 0.62 if risk_state == "acceptable" else 0.4,
+        "risk_warning": "Risk filter veto active due to RR below 1:2." if veto else "Risk profile acceptable for strategy constraints.",
     }
 
 
@@ -299,53 +558,21 @@ def _scenario_key(technical: Dict[str, Any], sentiment: Dict[str, Any], risk: Di
     return f"{trend}|{sentiment_bucket}|{macd_state}|{risk_state}"
 
 
-class ScenarioStore:
-    def __init__(self, max_samples_per_scenario: int = 500):
-        self.max_samples_per_scenario = max_samples_per_scenario
-        self.scenarios: Dict[str, Deque[bool]] = {}
-        self.pending_predictions: Dict[str, Dict[str, Any]] = {}
-        self._counter = 0
-
-    def register_prediction(self, scenario_key: str, symbol: str, entry_price: float) -> str:
-        self._counter += 1
-        prediction_id = f"p_{self._counter}"
-        self.pending_predictions[prediction_id] = {
-            "scenario_key": scenario_key,
-            "symbol": symbol,
-            "entry_price": entry_price,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        return prediction_id
-
-    def resolve_prediction(self, prediction_id: str, exit_price: float) -> Optional[Dict[str, Any]]:
-        prediction = self.pending_predictions.pop(prediction_id, None)
-        if prediction is None:
-            return None
-
-        scenario_key = prediction["scenario_key"]
-        entry_price = prediction["entry_price"]
-        outcome_up = bool(exit_price > entry_price)
-        if scenario_key not in self.scenarios:
-            self.scenarios[scenario_key] = deque(maxlen=self.max_samples_per_scenario)
-        self.scenarios[scenario_key].append(outcome_up)
-        history = self.scenarios[scenario_key]
-        wins = sum(1 for outcome in history if outcome)
-        return {
-            "prediction_id": prediction_id,
-            "scenario_key": scenario_key,
-            "samples": len(history),
-            "wins": wins,
-            "win_probability": round((wins / len(history)) * 100, 2) if history else 50.0,
-        }
-
-    def get_probability(self, scenario_key: str) -> Tuple[int, int, float]:
-        history = self.scenarios.get(scenario_key)
-        if not history:
-            return 0, 0, 50.0
-        wins = sum(1 for outcome in history if outcome)
-        total = len(history)
-        probability = (wins / total) * 100 if total else 50.0
-        return wins, total, round(probability, 2)
+def _setup_vector(technical: Dict[str, Any], sentiment: Dict[str, Any], risk: Dict[str, Any]) -> List[float]:
+    indicators = technical.get("indicators", {})
+    trend = technical.get("bias", "neutral")
+    trend_up = 1.0 if trend == "bullish" else 0.0
+    trend_down = 1.0 if trend == "bearish" else 0.0
+    return [
+        indicators.get("rsi_14", 50.0) / 100.0,
+        indicators.get("macd", 0.0),
+        indicators.get("signal_line", 0.0),
+        sentiment.get("sentiment_score", 0.0) / 100.0,
+        risk.get("volatility", 0.0),
+        min(5.0, max(0.0, risk.get("risk_reward_ratio", 0.0))) / 5.0,
+        trend_up,
+        trend_down,
+    ]
 
 
 def synthesizer_agent(
@@ -353,63 +580,75 @@ def synthesizer_agent(
     technical: Dict[str, Any],
     sentiment: Dict[str, Any],
     risk: Dict[str, Any],
-    scenario_store: ScenarioStore,
+    vector_store: VectorBacktestStore,
+    degraded_mode: bool,
 ) -> Dict[str, Any]:
     scenario_key = _scenario_key(technical=technical, sentiment=sentiment, risk=risk)
-    wins, total, empirical_probability = scenario_store.get_probability(scenario_key)
+    setup_vector = _setup_vector(technical=technical, sentiment=sentiment, risk=risk)
+
+    matches = vector_store.query_similar_setups(symbol=symbol, vector=setup_vector, top_k=500)
+    total = len(matches)
+    wins = sum(1 for row in matches if row.get("success"))
+
+    probability = ((wins + 1) / (total + 2)) * 100 if total > 0 else 50.0
 
     technical_signal = 1 if technical.get("bias") == "bullish" else (-1 if technical.get("bias") == "bearish" else 0)
     sentiment_signal = sentiment.get("sentiment_score", 0) / 100
-    risk_multiplier = 1.0 if risk.get("risk_state") == "acceptable" else 0.75
+    blended = 50 + technical_signal * 12 + sentiment_signal * 18
+    final_probability = 0.7 * probability + 0.3 * blended if total > 0 else blended
 
-    model_probability = 50 + technical_signal * 16 + sentiment_signal * 18
-    final_probability = (empirical_probability * 0.7 + model_probability * 0.3) if total > 0 else model_probability
-    final_probability = max(5.0, min(95.0, final_probability * risk_multiplier))
-    # Alignment strength between technical (-1/0/1) and sentiment (-1..1), normalized to [0, 1].
-    consensus_score = abs(technical_signal + sentiment_signal) / 2
-    confidence_band = "high" if final_probability >= 68 else ("medium" if final_probability >= 53 else "low")
+    if degraded_mode:
+        final_probability *= 0.9
 
-    if final_probability >= 60 and risk.get("risk_reward_ratio", 0) >= 1.5:
+    final_probability = max(5.0, min(95.0, final_probability))
+
+    rr = risk.get("risk_reward_ratio", 0)
+    risk_veto = risk.get("veto", False)
+
+    if risk_veto:
+        signal = "HOLD"
+    elif final_probability >= 60 and rr >= 2.0:
         signal = "BUY"
-    elif final_probability <= 40 and risk.get("risk_reward_ratio", 0) >= 1.5:
+    elif final_probability <= 40 and rr >= 2.0:
         signal = "SELL"
     else:
         signal = "HOLD"
 
+    confidence_band = "high" if final_probability >= 68 else ("medium" if final_probability >= 53 else "low")
+    consensus_score = round(abs(technical_signal + sentiment_signal) / 2, 2)
+
     justification = (
-        f"{signal} with {round(final_probability, 2)}% probability. "
-        f"Scenario={scenario_key}. "
-        f"Empirical outcomes: {wins}/{total} wins. "
-        f"Technical={technical.get('bias')} ({technical.get('detected_pattern')}), "
-        f"Sentiment={sentiment.get('sentiment_score')}, "
-        f"RR={risk.get('risk_reward_ratio')}."
+        f"{signal} with {round(final_probability, 2)}% probability from Bayesian top-{total} setup matching "
+        f"({wins}/{total} successes). Technical={technical.get('bias')}, sentiment={sentiment.get('sentiment_score')}, "
+        f"RR={rr}, degraded_mode={degraded_mode}."
     )
+
     return {
         "agent": "synthesizer",
         "symbol": symbol,
         "signal": signal,
         "win_probability": round(final_probability, 2),
-        "consensus_score": round(consensus_score, 2),
+        "consensus_score": consensus_score,
         "confidence_band": confidence_band,
         "historical_wins": wins,
         "historical_matches": total,
         "scenario_key": scenario_key,
         "justification": justification,
+        "degraded_mode": degraded_mode,
+        "confidence_modifier": 0.9 if degraded_mode else 1.0,
     }
 
 
-def build_brain_log(
-    technical: Dict[str, Any],
-    sentiment: Dict[str, Any],
-    risk: Dict[str, Any],
-    synthesis: Dict[str, Any],
-) -> List[Dict[str, str]]:
+def build_brain_log(technical: Dict[str, Any], sentiment: Dict[str, Any], risk: Dict[str, Any], synthesis: Dict[str, Any], degrade_reasons: List[str]) -> List[Dict[str, str]]:
     now = datetime.now(timezone.utc).isoformat()
-    return [
+    logs = [
         {
             "timestamp": now,
             "agent": "Technical Analyst",
-            "message": f"{technical.get('bias')} | {technical.get('detected_pattern')} | RSI={technical.get('indicators', {}).get('rsi_14')}",
+            "message": (
+                f"{technical.get('bias')} | RSI={technical.get('indicators', {}).get('rsi_14')} "
+                f"MACD={technical.get('indicators', {}).get('macd')}"
+            ),
         },
         {
             "timestamp": now,
@@ -421,16 +660,79 @@ def build_brain_log(
             "agent": "Risk Manager",
             "message": (
                 f"VaR={risk.get('value_at_risk_95')} RR={risk.get('risk_reward_ratio')} "
-                f"SL={risk.get('stop_loss')} TP={risk.get('take_profit')} "
-                f"Size={risk.get('position_size_pct')}%"
+                f"SL={risk.get('stop_loss')} TP={risk.get('take_profit')} veto={risk.get('veto')}"
             ),
         },
         {
             "timestamp": now,
             "agent": "Chief Synthesizer",
-            "message": f"{synthesis.get('signal')} at {synthesis.get('win_probability')}% ({synthesis.get('historical_wins')}/{synthesis.get('historical_matches')})",
+            "message": f"{synthesis.get('signal')} @ {synthesis.get('win_probability')}% ({synthesis.get('historical_wins')}/{synthesis.get('historical_matches')})",
         },
     ]
+    for reason in degrade_reasons:
+        logs.append({"timestamp": now, "agent": "Chief Synthesizer", "message": f"Degraded mode: {reason}"})
+    return logs
+
+
+def build_langgraph_orchestrator(
+    symbol: str,
+    quote_payload: Dict[str, Any],
+    news_payload: Dict[str, Any],
+    candles: List[Dict[str, float]],
+    vector_store: VectorBacktestStore,
+) -> Dict[str, Any]:
+    graph = StateGraph(MarketAgentState)
+
+    def technical_node(state: MarketAgentState) -> MarketAgentState:
+        technical = technical_agent(symbol=state["symbol"], candles=state["candles"])
+        return {"technical": technical}
+
+    def sentiment_node(state: MarketAgentState) -> MarketAgentState:
+        sentiment = sentiment_agent(symbol=state["symbol"], news_payload=state["news_payload"])
+        degraded = bool(sentiment.get("degraded"))
+        reasons: List[str] = []
+        if degraded:
+            reasons.append("News sources rate-limited/unavailable; sentiment confidence reduced.")
+        return {"sentiment": sentiment, "degraded_mode": degraded, "degrade_reasons": reasons}
+
+    def risk_node(state: MarketAgentState) -> MarketAgentState:
+        risk = risk_agent(symbol=state["symbol"], candles=state["candles"], technical=state["technical"])
+        return {"risk": risk}
+
+    def synthesizer_node(state: MarketAgentState) -> MarketAgentState:
+        synthesis = synthesizer_agent(
+            symbol=state["symbol"],
+            technical=state["technical"],
+            sentiment=state["sentiment"],
+            risk=state["risk"],
+            vector_store=vector_store,
+            degraded_mode=bool(state.get("degraded_mode", False)),
+        )
+        return {"synthesis": synthesis}
+
+    graph.add_node("technical", technical_node)
+    graph.add_node("sentiment", sentiment_node)
+    graph.add_node("risk", risk_node)
+    graph.add_node("synthesizer", synthesizer_node)
+
+    graph.set_entry_point("technical")
+    graph.add_edge("technical", "sentiment")
+    graph.add_edge("sentiment", "risk")
+    graph.add_edge("risk", "synthesizer")
+    graph.add_edge("synthesizer", END)
+
+    app = graph.compile()
+    state = app.invoke(
+        {
+            "symbol": symbol,
+            "quote_payload": quote_payload,
+            "news_payload": news_payload,
+            "candles": candles,
+            "degraded_mode": False,
+            "degrade_reasons": [],
+        }
+    )
+    return state
 
 
 def build_dashboard_snapshot(
@@ -438,33 +740,72 @@ def build_dashboard_snapshot(
     quote_payload: Dict[str, Any],
     news_payload: Dict[str, Any],
     scenario_store: ScenarioStore,
+    vector_store: VectorBacktestStore,
+    paper_trader: PaperTradingEngine,
     nse_raw_fetcher: Optional[Any] = None,
     lookback_points: int = 240,
 ) -> Dict[str, Any]:
-    candles = _fetch_live_candles(
+    candles = _fetch_live_candles(symbol=symbol, nse_raw_fetcher=nse_raw_fetcher, lookback_points=lookback_points)
+
+    state = build_langgraph_orchestrator(
         symbol=symbol,
-        nse_raw_fetcher=nse_raw_fetcher,
-        lookback_points=lookback_points,
+        quote_payload=quote_payload,
+        news_payload=news_payload,
+        candles=candles,
+        vector_store=vector_store,
     )
-    technical = technical_agent(symbol=symbol, candles=candles)
-    sentiment = sentiment_agent(symbol=symbol, news_payload=news_payload)
-    risk = risk_agent(symbol=symbol, candles=candles, technical=technical)
-    synthesis = synthesizer_agent(
-        symbol=symbol,
-        technical=technical,
-        sentiment=sentiment,
-        risk=risk,
-        scenario_store=scenario_store,
-    )
+
+    technical = state["technical"]
+    sentiment = state["sentiment"]
+    risk = state["risk"]
+    synthesis = state["synthesis"]
+    degrade_reasons = state.get("degrade_reasons", [])
 
     market = quote_payload.get("stock", {}) if isinstance(quote_payload, dict) else {}
     current_price = _to_float(market.get("last_price"), fallback=candles[-1]["close"] if candles else 0.0)
     previous_close = _to_float(market.get("previous_close"), fallback=current_price)
+
     prediction_id = scenario_store.register_prediction(
         scenario_key=synthesis.get("scenario_key", "unknown"),
         symbol=symbol.upper(),
         entry_price=current_price,
+        signal=synthesis.get("signal", "HOLD"),
+        stop_loss=float(risk.get("stop_loss", 0.0)),
+        take_profit=float(risk.get("take_profit", 0.0)),
     )
+
+    if synthesis.get("signal") in {"BUY", "SELL"}:
+        paper_trader.execute_signal(
+            symbol=symbol,
+            signal=synthesis["signal"],
+            entry_price=current_price,
+            stop_loss=float(risk.get("stop_loss", current_price)),
+            take_profit=float(risk.get("take_profit", current_price)),
+            probability=float(synthesis.get("win_probability", 50.0)),
+        )
+
+    paper_position = paper_trader.mark_price(symbol=symbol, current_price=current_price)
+
+    vector_store.add_setup(
+        symbol=symbol,
+        vector=_setup_vector(technical=technical, sentiment=sentiment, risk=risk),
+        metadata={
+            "scenario_key": synthesis.get("scenario_key"),
+            "signal": synthesis.get("signal"),
+            "prediction_id": prediction_id,
+        },
+        success=bool(synthesis.get("signal") == "BUY" and current_price >= float(risk.get("take_profit", current_price))),
+    )
+
+    markers: List[Dict[str, Any]] = []
+    if synthesis.get("signal") in {"BUY", "SELL"}:
+        markers.append(
+            {
+                "time": candles[-1]["t"],
+                "price": current_price,
+                "signal": synthesis.get("signal"),
+            }
+        )
 
     return {
         "symbol": symbol.upper(),
@@ -474,6 +815,10 @@ def build_dashboard_snapshot(
             "current_price": round(current_price, 2),
             "previous_close": round(previous_close, 2),
             "candles": candles,
+            "overlays": {
+                "order_blocks": technical.get("order_blocks", []),
+                "signal_markers": markers,
+            },
             "news": news_payload.get("items", [])[:30] if isinstance(news_payload, dict) else [],
         },
         "agents": {
@@ -482,5 +827,15 @@ def build_dashboard_snapshot(
             "risk": risk,
             "synthesizer": synthesis,
         },
-        "brain_log": build_brain_log(technical=technical, sentiment=sentiment, risk=risk, synthesis=synthesis),
+        "paper_trading": {
+            "latest_position": paper_position,
+            "summary": paper_trader.get_summary(symbol=symbol),
+        },
+        "brain_log": build_brain_log(
+            technical=technical,
+            sentiment=sentiment,
+            risk=risk,
+            synthesis=synthesis,
+            degrade_reasons=degrade_reasons,
+        ),
     }
