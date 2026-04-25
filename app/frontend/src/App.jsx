@@ -3,7 +3,9 @@ import axios from "axios";
 import { createChart } from "lightweight-charts";
 import { motion } from "framer-motion";
 
-const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL?.trim() || (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin)).replace(/\/+$/, "");
+const configuredBackendUrl = import.meta.env.VITE_BACKEND_URL?.trim();
+const backendOrigin = configuredBackendUrl || (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
+const BACKEND_URL = backendOrigin.replace(/\/+$/, "");
 const API = `${BACKEND_URL}/api`;
 const WS_BASE = BACKEND_URL.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
 const DEFAULT_REFRESH_INTERVAL_MS = 60000;

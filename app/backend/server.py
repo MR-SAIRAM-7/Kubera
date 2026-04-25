@@ -81,7 +81,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _parse_cors_origins(raw: str) -> List[str]:
-    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    origins = []
+    for origin in raw.split(","):
+        stripped_origin = origin.strip()
+        if stripped_origin:
+            origins.append(stripped_origin)
     return origins or ["*"]
 
 
