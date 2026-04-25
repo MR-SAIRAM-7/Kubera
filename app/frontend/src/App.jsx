@@ -7,6 +7,8 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
 const WS_BASE = BACKEND_URL.replace(/^http/i, "ws");
 const DEFAULT_REFRESH_INTERVAL_MS = 60000;
+// Maps RR=4.0 to full gauge; RR>=4.0 remains capped at 100%.
+const RR_SCALE_FACTOR = 25;
 const REFRESH_OPTIONS = [
   { label: "30s", value: 30000 },
   { label: "1m", value: 60000 },
@@ -96,13 +98,16 @@ const ChartPanel = ({ market, technical, risk, synthesis }) => {
     addGuideLine(risk?.stop_loss, "#EF4444");
     addGuideLine(risk?.take_profit, "#22D3EE");
 
-    const markers = (market?.overlays?.signal_markers ?? []).map((marker) => ({
-      time: marker.time,
-      position: marker.signal === "BUY" ? "belowBar" : "aboveBar",
-      color: marker.signal === "BUY" ? "#10B981" : "#EF4444",
-      shape: marker.signal === "BUY" ? "arrowUp" : "arrowDown",
-      text: marker.signal,
-    }));
+    const markers = (market?.overlays?.signal_markers ?? []).map((marker) => {
+      const isBuy = marker.signal === "BUY";
+      return {
+        time: marker.time,
+        position: isBuy ? "belowBar" : "aboveBar",
+        color: isBuy ? "#10B981" : "#EF4444",
+        shape: isBuy ? "arrowUp" : "arrowDown",
+        text: marker.signal,
+      };
+    });
     if (markers.length && typeof series.setMarkers === "function") {
       series.setMarkers(markers);
     }
@@ -205,7 +210,10 @@ const App = () => {
           setError("Invalid stream payload");
         }
       };
-      socket.onerror = () => setError("WebSocket unavailable; using HTTP refresh fallback.");
+      socket.onerror = (event) => {
+        console.warn("WebSocket error", event);
+        setError("Realtime stream error; using HTTP refresh fallback.");
+      };
       socket.onclose = () => {};
     },
     [],
@@ -346,7 +354,7 @@ const App = () => {
           <h3 className="mb-3 text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Confidence vs Risk</h3>
           <div className="space-y-3">
             <Gauge label="Winning Probability" value={probability} />
-            <Gauge label="Risk/Reward Strength" value={Math.min(100, rr * 25)} good={rr >= 2} />
+            <Gauge label="Risk/Reward Strength" value={Math.min(100, rr * RR_SCALE_FACTOR)} good={rr >= 2} />
             <Gauge label="Sentiment Conviction" value={Math.abs(sentiment?.sentiment_score ?? 0)} />
           </div>
         </section>

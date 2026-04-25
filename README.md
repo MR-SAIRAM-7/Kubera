@@ -56,7 +56,7 @@ Services:
 ### 2) Frontend (local)
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/frontend
+cd app/frontend
 npm ci
 npm run dev
 ```
@@ -162,9 +162,7 @@ Base URL: `http://localhost:8000/api`
 4. **Bayesian win probability**  
    With Beta(1,1) prior and `wins` successful outcomes from `total` matches:
 
-   \[
-   P(win) = \frac{wins + 1}{total + 2}
-   \]
+   `P(win) = (wins + 1) / (total + 2)`
 
    Output percentage = `P(win) * 100`.
 
@@ -180,14 +178,14 @@ Base URL: `http://localhost:8000/api`
 Backend:
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/backend
+cd app/backend
 python -m compileall .
 ```
 
 Frontend:
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/frontend
+cd app/frontend
 npm run lint
 npm run build
 ```

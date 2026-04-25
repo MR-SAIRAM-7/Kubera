@@ -8,6 +8,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+# Institutional guardrail: enforce minimum 1:2 RR before any trade can pass risk veto.
 RISK_ACCEPTABLE_MIN_RR = 2.0
 RISK_ACCEPTABLE_MAX_VOLATILITY = 0.03
 LOW_VOLATILITY_THRESHOLD = 0.02
@@ -15,6 +16,10 @@ POSITION_SIZE_HIGH = 2.0
 POSITION_SIZE_MEDIUM = 1.0
 POSITION_SIZE_LOW = 0.5
 POSITION_SIZE_MEDIUM_MIN_RR = 1.2
+ATR_SL_MULTIPLIER = 1.2
+ATR_TP_MULTIPLIER = 2.4
+VAR_SL_MULTIPLIER = 0.9
+VAR_TP_MULTIPLIER = 1.8
 
 POSITIVE_WORDS = {
     "deal",
@@ -216,16 +221,17 @@ class PaperTradingEngine:
             hit_sl = current_price >= sl
             hit_tp = current_price <= tp
 
-        position["unrealized_pnl"] = round(pnl, 2)
-
         if hit_sl or hit_tp:
             position["status"] = "CLOSED"
             position["closed_at"] = datetime.now(timezone.utc).isoformat()
             position["exit_price"] = round(current_price, 2)
             position["realized_pnl"] = round(pnl, 2)
+            position["unrealized_pnl"] = 0.0
             position["closure_reason"] = "TP" if hit_tp else "SL"
-            self.closed_positions.append(dict(position))
+            self.closed_positions.append(position.copy())
             self.positions.pop(symbol, None)
+        else:
+            position["unrealized_pnl"] = round(pnl, 2)
 
         return position
 
@@ -240,18 +246,15 @@ class PaperTradingEngine:
 
         realized = sum(float(row.get("realized_pnl", 0.0)) for row in closed)
         unrealized = sum(float(row.get("unrealized_pnl", 0.0)) for row in open_pos)
+        wins = sum(1 for row in closed if float(row.get("realized_pnl", 0.0)) > 0)
+        win_rate = round((wins / len(closed)) * 100, 2) if closed else 0.0
         return {
             "open_positions": open_pos,
             "closed_positions": closed[-50:],
             "realized_pnl": round(realized, 2),
             "unrealized_pnl": round(unrealized, 2),
             "total_trades": len(closed),
-            "win_rate": round(
-                (sum(1 for row in closed if float(row.get("realized_pnl", 0.0)) > 0) / len(closed)) * 100,
-                2,
-            )
-            if closed
-            else 0.0,
+            "win_rate": win_rate,
         }
 
 
@@ -292,7 +295,11 @@ def _from_series_rows(rows: List[Dict[str, Any]], points: int = 240) -> List[Dic
     return candles
 
 
-def _fetch_live_candles(symbol: str, nse_raw_fetcher: Optional[Any] = None, lookback_points: int = 240) -> List[Dict[str, float]]:
+def _fetch_live_candles(
+    symbol: str,
+    nse_raw_fetcher: Optional[Any] = None,
+    lookback_points: int = 240,
+) -> List[Dict[str, float]]:
     if nse_raw_fetcher is None:
         raise ValueError("Live market data source is required")
 
@@ -512,11 +519,11 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
 
     bias = technical.get("bias", "neutral")
     if bias == "bullish":
-        stop_loss = price - max(atr * 1.2, var_95 * 0.9)
-        take_profit = price + max(atr * 2.4, var_95 * 1.8)
+        stop_loss = price - max(atr * ATR_SL_MULTIPLIER, var_95 * VAR_SL_MULTIPLIER)
+        take_profit = price + max(atr * ATR_TP_MULTIPLIER, var_95 * VAR_TP_MULTIPLIER)
     elif bias == "bearish":
-        stop_loss = price + max(atr * 1.2, var_95 * 0.9)
-        take_profit = price - max(atr * 2.4, var_95 * 1.8)
+        stop_loss = price + max(atr * ATR_SL_MULTIPLIER, var_95 * VAR_SL_MULTIPLIER)
+        take_profit = price - max(atr * ATR_TP_MULTIPLIER, var_95 * VAR_TP_MULTIPLIER)
     else:
         stop_loss = price - atr
         take_profit = price + atr * 1.5
@@ -639,7 +646,13 @@ def synthesizer_agent(
     }
 
 
-def build_brain_log(technical: Dict[str, Any], sentiment: Dict[str, Any], risk: Dict[str, Any], synthesis: Dict[str, Any], degrade_reasons: List[str]) -> List[Dict[str, str]]:
+def build_brain_log(
+    technical: Dict[str, Any],
+    sentiment: Dict[str, Any],
+    risk: Dict[str, Any],
+    synthesis: Dict[str, Any],
+    degrade_reasons: List[str],
+) -> List[Dict[str, str]]:
     now = datetime.now(timezone.utc).isoformat()
     logs = [
         {
@@ -786,17 +799,6 @@ def build_dashboard_snapshot(
 
     paper_position = paper_trader.mark_price(symbol=symbol, current_price=current_price)
 
-    vector_store.add_setup(
-        symbol=symbol,
-        vector=_setup_vector(technical=technical, sentiment=sentiment, risk=risk),
-        metadata={
-            "scenario_key": synthesis.get("scenario_key"),
-            "signal": synthesis.get("signal"),
-            "prediction_id": prediction_id,
-        },
-        success=bool(synthesis.get("signal") == "BUY" and current_price >= float(risk.get("take_profit", current_price))),
-    )
-
     markers: List[Dict[str, Any]] = []
     if synthesis.get("signal") in {"BUY", "SELL"}:
         markers.append(
@@ -806,6 +808,23 @@ def build_dashboard_snapshot(
                 "signal": synthesis.get("signal"),
             }
         )
+
+    for trade in paper_trader.closed_positions:
+        if trade.get("symbol") != symbol.upper() or trade.get("status") != "CLOSED":
+            continue
+        if trade.get("vector_recorded"):
+            continue
+        vector_store.add_setup(
+            symbol=symbol,
+            vector=_setup_vector(technical=technical, sentiment=sentiment, risk=risk),
+            metadata={
+                "scenario_key": synthesis.get("scenario_key"),
+                "signal": trade.get("side"),
+                "closure_reason": trade.get("closure_reason"),
+            },
+            success=bool(float(trade.get("realized_pnl", 0.0)) > 0),
+        )
+        trade["vector_recorded"] = True
 
     return {
         "symbol": symbol.upper(),

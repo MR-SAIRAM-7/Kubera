@@ -12,13 +12,16 @@ from typing import Any, Dict, List, Optional, Set
 import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.cors import CORSMiddleware
 
 try:
     from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-except Exception:  # noqa: BLE001
+except ImportError as exc:
+    logger = logging.getLogger(__name__)
+    logger.warning("aiokafka is unavailable; Kafka topic auto-provisioning disabled: %s", exc)
     AIOKafkaAdminClient = None
     NewTopic = None
 
@@ -63,8 +66,10 @@ api_router = APIRouter(prefix="/api")
 scenario_store = ScenarioStore(max_samples_per_scenario=500)
 vector_store = VectorBacktestStore(max_items_per_symbol=3000)
 paper_trader = PaperTradingEngine()
-SYMBOL_PATTERN = re.compile(r"^[A-Z0-9:._-]{1,30}$")
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9:._-]{1,64}$")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC_PARTITIONS = int(os.environ.get("KAFKA_TOPIC_PARTITIONS", "3"))
+KAFKA_TOPIC_REPLICATION_FACTOR = int(os.environ.get("KAFKA_TOPIC_REPLICATION_FACTOR", "1"))
 WS_STREAM_INTERVAL = int(os.environ.get("WS_STREAM_INTERVAL_SECONDS", "5"))
 
 
@@ -107,7 +112,10 @@ dashboard_cache = TTLCache(
 def _normalize_symbol(symbol: str) -> str:
     normalized = symbol.strip().upper()
     if not normalized or not SYMBOL_PATTERN.match(normalized):
-        raise HTTPException(status_code=422, detail="Invalid symbol format.")
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid symbol format. Use exchange-prefixed symbols like NSE:RELIANCE or plain ticker tokens.",
+        )
     return normalized
 
 
@@ -135,8 +143,12 @@ class WebSocketHub:
             conns = list(self.connections.get(symbol, set()))
         for ws in conns:
             try:
+                if ws.client_state != WebSocketState.CONNECTED:
+                    await self.disconnect(symbol, ws)
+                    continue
                 await ws.send_json(payload)
-            except Exception:  # noqa: BLE001
+            except RuntimeError as exc:
+                logger.warning("WebSocket send failed for %s: %s", symbol, exc)
                 await self.disconnect(symbol, ws)
 
 
@@ -215,9 +227,18 @@ class DynamicTickerRegistry:
         admin = AIOKafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP)
         try:
             await admin.start()
-            await admin.create_topics([NewTopic(name=topic, num_partitions=3, replication_factor=1)])
+            await admin.create_topics(
+                [
+                    NewTopic(
+                        name=topic,
+                        num_partitions=max(1, KAFKA_TOPIC_PARTITIONS),
+                        replication_factor=max(1, KAFKA_TOPIC_REPLICATION_FACTOR),
+                    )
+                ]
+            )
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Kafka topic creation failed for %s: %s", topic, exc)
             return False
         finally:
             try:
@@ -446,13 +467,14 @@ async def dashboard_websocket(websocket: WebSocket, symbol: str, news_limit: int
     await websocket_hub.connect(normalized, websocket)
     try:
         while True:
-            payload = await _build_snapshot(symbol=normalized, news_limit=max(5, min(100, int(news_limit))), force_refresh=True)
+            payload = await _build_snapshot(symbol=normalized, news_limit=max(5, min(100, int(news_limit))), force_refresh=False)
             await alert_dispatcher.maybe_dispatch(symbol=normalized, snapshot=payload)
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(WS_STREAM_INTERVAL)
     except WebSocketDisconnect:
         await websocket_hub.disconnect(normalized, websocket)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("WebSocket stream failed for %s: %s", normalized, exc)
         await websocket_hub.disconnect(normalized, websocket)
 
 
