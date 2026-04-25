@@ -14,14 +14,18 @@ from datetime import datetime, timezone
 
 try:
     from .NSE.nseScraper import NSEScraper
+    from .NSE.nseScraper import NSEScraperError
     from .BSE.bseScraper import BSEScraper
     from .social.getNews import NewsScraper
+    from .social.getNews import NewsScraperError
     from .agents import build_dashboard_snapshot, ScenarioStore
 except ImportError:
     # Fallback for running as a script from backend working directory.
     from NSE.nseScraper import NSEScraper
+    from NSE.nseScraper import NSEScraperError
     from BSE.bseScraper import BSEScraper
     from social.getNews import NewsScraper
+    from social.getNews import NewsScraperError
     from agents import build_dashboard_snapshot, ScenarioStore
 
 
@@ -65,6 +69,13 @@ class TTLCache:
         self._store: Dict[str, Dict[str, Any]] = {}
 
     def get(self, key: str, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
+        """Return cached payload metadata for key.
+
+        When `allow_stale=False`, only unexpired values are returned.
+        When `allow_stale=True`, expired values are returned with `stale=True`
+        so callers can decide whether to serve degraded data.
+        Return shape: `{"value": <payload>, "stale": <bool>}` or `None`.
+        """
         item = self._store.get(key)
         if item is None:
             return None
@@ -77,6 +88,7 @@ class TTLCache:
         return None
 
     def set(self, key: str, value: Dict[str, Any]) -> None:
+        """Store payload with TTL; evict oldest entry when capacity is reached."""
         if len(self._store) >= self.max_items:
             oldest_key = min(self._store, key=lambda entry: self._store[entry]["created_at"])
             self._store.pop(oldest_key, None)
@@ -217,6 +229,8 @@ async def get_autonomous_dashboard(
 ):
     normalized_symbol = _normalize_symbol(symbol)
     cache_key = f"{normalized_symbol}:{news_limit}"
+    snapshot: Optional[Dict[str, Any]] = None
+    live_source_error = False
     if not force_refresh:
         cached = dashboard_cache.get(cache_key)
         if cached is not None:
@@ -255,22 +269,28 @@ async def get_autonomous_dashboard(
             nse_raw_fetcher=nse_live_candle_fetcher,
             lookback_points=240,
         )
+    except (NSEScraperError, NewsScraperError, ValueError, RuntimeError):
+        live_source_error = True
+        logger.error("Dashboard synthesis failed for %s", normalized_symbol)
+
+    if snapshot is not None:
         dashboard_cache.set(cache_key, snapshot)
         payload = dict(snapshot)
         payload["cache"] = {"hit": False, "stale": False}
         return payload
-    except Exception:  # noqa: BLE001
-        logger.exception("Dashboard synthesis failed for %s", normalized_symbol)
+
+    if live_source_error:
         stale = dashboard_cache.get(cache_key, allow_stale=True)
         if stale is not None:
             payload = dict(stale["value"])
             payload["cache"] = {"hit": True, "stale": True}
             payload["warning"] = "Live source unavailable. Showing cached snapshot."
             return payload
-        raise HTTPException(
-            status_code=502,
-            detail="Dashboard synthesis failed. Live data source is unavailable for the requested symbol.",
-        )
+
+    raise HTTPException(
+        status_code=502,
+        detail="Dashboard synthesis failed. Live data source is unavailable for the requested symbol.",
+    )
 
 
 class PredictionOutcome(BaseModel):

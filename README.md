@@ -75,7 +75,7 @@ Kubera/
 ### 4.2 Backend
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/backend
+cd app/backend
 python -m pip install -r requirements.txt
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -83,7 +83,7 @@ uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ### 4.3 Frontend
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/frontend
+cd app/frontend
 npm ci
 npm run dev
 ```
@@ -175,7 +175,7 @@ Base URL: `http://localhost:8000/api`
 Frontend:
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/frontend
+cd app/frontend
 npm run lint
 npm run build
 ```
@@ -183,7 +183,7 @@ npm run build
 Backend:
 
 ```bash
-cd /home/runner/work/Kubera/Kubera/app/backend
+cd app/backend
 python -m compileall .
 ```
 

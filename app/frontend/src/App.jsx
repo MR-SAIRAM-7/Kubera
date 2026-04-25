@@ -74,8 +74,13 @@ const ChartPanel = ({ candles, technical, risk }) => {
     const stopLoss = risk?.stop_loss;
     const takeProfit = risk?.take_profit;
 
+    /**
+     * Draw a horizontal price level guide (support/resistance/SL/TP).
+     * @param {number} price Level to draw on the chart.
+     * @param {string} color Hex color for the guide.
+     */
     const addGuideLine = (price, color) => {
-      if (!Number.isFinite(price)) return;
+      if (!Number.isFinite(price) || !candles.length) return;
       const line = chart.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
       line.setData([
         { time: candles[0].t, value: price },
