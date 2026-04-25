@@ -71,6 +71,36 @@ KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC_PARTITIONS = int(os.environ.get("KAFKA_TOPIC_PARTITIONS", "3"))
 KAFKA_TOPIC_REPLICATION_FACTOR = int(os.environ.get("KAFKA_TOPIC_REPLICATION_FACTOR", "1"))
 WS_STREAM_INTERVAL = int(os.environ.get("WS_STREAM_INTERVAL_SECONDS", "5"))
+SAFE_DEFAULT_CORS_ORIGIN = "http://localhost:5173"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_cors_origins(raw: str) -> List[str]:
+    origins = []
+    for origin in raw.split(","):
+        stripped_origin = origin.strip()
+        if stripped_origin:
+            origins.append(stripped_origin)
+    if origins:
+        return origins
+    logger.warning("CORS_ORIGINS is empty. Falling back to %s.", SAFE_DEFAULT_CORS_ORIGIN)
+    return [SAFE_DEFAULT_CORS_ORIGIN]
+
+
+cors_origins = _parse_cors_origins(os.environ.get("CORS_ORIGINS", SAFE_DEFAULT_CORS_ORIGIN))
+cors_allow_credentials = _env_bool("CORS_ALLOW_CREDENTIALS", default=False)
+if "*" in cors_origins and cors_allow_credentials:
+    logger.warning(
+        "CORS_ALLOW_CREDENTIALS=true is incompatible with CORS_ORIGINS='*'. "
+        "Set explicit origins in CORS_ORIGINS to enable credentials. Falling back to false."
+    )
+    cors_allow_credentials = False
 
 
 class TTLCache:
@@ -481,8 +511,8 @@ async def dashboard_websocket(websocket: WebSocket, symbol: str, news_limit: int
 app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_credentials=cors_allow_credentials,
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

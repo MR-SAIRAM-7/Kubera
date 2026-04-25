@@ -38,6 +38,7 @@ Request body:
 Frontend:
 
 - `VITE_BACKEND_URL` (example: `http://localhost:8000`)
+  - defaults to `http://localhost:8000` in dev and current origin in production when unset
 
 Backend:
 
@@ -45,7 +46,13 @@ Backend:
   - `MONGO_URL`
   - `DB_NAME`
 - Optional CORS:
-  - `CORS_ORIGINS` (comma-separated)
+  - `CORS_ORIGINS` (comma-separated, defaults to `http://localhost:5173`)
+  - `CORS_ALLOW_CREDENTIALS` (default `false`; should stay `false` when using wildcard origins)
+
+Environment templates:
+
+- `app/backend/.env.example`
+- `app/frontend/.env.example`
 
 ### Run
 

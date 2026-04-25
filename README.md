@@ -69,10 +69,13 @@ Frontend runs at `http://localhost:5173`.
 
 ### Backend
 
-- `CORS_ORIGINS` (default `*`)
+- `CORS_ORIGINS` (default `http://localhost:5173`)
+- `CORS_ALLOW_CREDENTIALS` (default `false`; use `true` only with explicit non-wildcard origins)
 - `DASHBOARD_CACHE_TTL_SECONDS` (default `45`)
 - `DASHBOARD_CACHE_MAX_ITEMS` (default `256`)
 - `KAFKA_BOOTSTRAP_SERVERS` (default `localhost:9092`)
+- `KAFKA_TOPIC_PARTITIONS` (default `3`)
+- `KAFKA_TOPIC_REPLICATION_FACTOR` (default `1`)
 - `WS_STREAM_INTERVAL_SECONDS` (default `5`)
 - `MONGO_URL` *(optional)*
 - `DB_NAME` *(optional)*
@@ -84,7 +87,12 @@ Frontend runs at `http://localhost:5173`.
 
 ### Frontend
 
-- `VITE_BACKEND_URL` (default `http://localhost:8000`)
+- `VITE_BACKEND_URL` (default: `http://localhost:8000` in dev, current origin in production)
+
+Use the shipped templates as a starting point:
+
+- `app/backend/.env.example`
+- `app/frontend/.env.example`
 
 ---
 
