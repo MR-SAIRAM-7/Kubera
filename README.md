@@ -69,7 +69,7 @@ Frontend runs at `http://localhost:5173`.
 
 ### Backend
 
-- `CORS_ORIGINS` (default `*`)
+- `CORS_ORIGINS` (default `http://localhost:5173`)
 - `CORS_ALLOW_CREDENTIALS` (default `false`; use `true` only with explicit non-wildcard origins)
 - `DASHBOARD_CACHE_TTL_SECONDS` (default `45`)
 - `DASHBOARD_CACHE_MAX_ITEMS` (default `256`)

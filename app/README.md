@@ -46,7 +46,7 @@ Backend:
   - `MONGO_URL`
   - `DB_NAME`
 - Optional CORS:
-  - `CORS_ORIGINS` (comma-separated)
+  - `CORS_ORIGINS` (comma-separated, defaults to `http://localhost:5173`)
   - `CORS_ALLOW_CREDENTIALS` (default `false`; should stay `false` when using wildcard origins)
 
 Environment templates:
