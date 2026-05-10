@@ -5,8 +5,16 @@ from datetime import datetime, timezone
 from math import sqrt
 from statistics import mean, pstdev
 from typing import Any, Deque, Dict, List, Optional, Tuple, TypedDict
+import importlib
 
 from langgraph.graph import END, StateGraph
+
+_market_ai = importlib.import_module(f"{__package__}.market_ai" if __package__ else "market_ai")
+FundamentalAgent = _market_ai.FundamentalAgent
+HistoricalProbabilityEngine = _market_ai.HistoricalProbabilityEngine
+PortfolioAgent = _market_ai.PortfolioAgent
+RegimeAgent = _market_ai.RegimeAgent
+run_walk_forward_backtest = _market_ai.run_walk_forward_backtest
 
 # Institutional guardrail: enforce minimum 1:2 RR before any trade can pass risk veto.
 RISK_ACCEPTABLE_MIN_RR = 2.0
@@ -57,8 +65,11 @@ class MarketAgentState(TypedDict, total=False):
     news_payload: Dict[str, Any]
     candles: List[Dict[str, float]]
     technical: Dict[str, Any]
+    fundamental: Dict[str, Any]
     sentiment: Dict[str, Any]
+    regime: Dict[str, Any]
     risk: Dict[str, Any]
+    portfolio: Dict[str, Any]
     synthesis: Dict[str, Any]
     degraded_mode: bool
     degrade_reasons: List[str]
@@ -408,6 +419,17 @@ def _atr(candles: List[Dict[str, float]], period: int = 14) -> float:
 
 
 def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, Any]:
+    if len(candles) < 5:
+        return {
+            "agent": "technical",
+            "symbol": symbol,
+            "bias": "neutral",
+            "confidence": 0.1,
+            "detected_pattern": "Insufficient candles",
+            "order_blocks": [],
+            "indicators": {},
+        }
+
     closes = [row["close"] for row in candles]
     highs = [row["high"] for row in candles]
     lows = [row["low"] for row in candles]
@@ -428,6 +450,8 @@ def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, A
     near_resistance = abs(resistance - last_close) / max(last_close, 1) <= 0.01
     bullish_divergence = closes[-1] > closes[-5] and rsi_14 > 50
     bearish_divergence = closes[-1] < closes[-5] and rsi_14 < 50
+    atr_14 = _atr(candles, period=14)
+    avg_volume_proxy = mean([row.get("volume", 0.0) for row in candles[-20:]]) if candles else 0.0
 
     bullish_votes = int(sma_20 > sma_50) + int(macd > signal_line) + int(rsi_14 > 52) + int(near_support) + int(bullish_divergence)
     bearish_votes = int(sma_20 < sma_50) + int(macd < signal_line) + int(rsi_14 < 45) + int(near_resistance) + int(bearish_divergence)
@@ -469,6 +493,8 @@ def technical_agent(symbol: str, candles: List[Dict[str, float]]) -> Dict[str, A
             "support": round(support, 2),
             "resistance": round(resistance, 2),
             "last_close": round(last_close, 2),
+            "atr_14": round(atr_14, 2),
+            "volume_spike_proxy": round(avg_volume_proxy, 2),
         },
     }
 
@@ -509,7 +535,17 @@ def sentiment_agent(symbol: str, news_payload: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
-def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str, Any]) -> Dict[str, Any]:
+def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str, Any], regime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if len(candles) < 2:
+        return {
+            "agent": "risk",
+            "symbol": symbol,
+            "risk_state": "blocked",
+            "veto": True,
+            "veto_reasons": ["INSUFFICIENT_PRICE_HISTORY"],
+            "risk_warning": "Risk filter veto active due to insufficient price history.",
+            "confidence": 0.1,
+        }
     closes = [row["close"] for row in candles]
     returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1] > 0]
     volatility = pstdev(returns) if len(returns) > 1 else 0.0
@@ -530,7 +566,15 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
 
     rr = abs(take_profit - price) / max(abs(price - stop_loss), 0.0001)
     risk_state = "acceptable" if rr >= RISK_ACCEPTABLE_MIN_RR and volatility < RISK_ACCEPTABLE_MAX_VOLATILITY else "elevated"
-    veto = rr < RISK_ACCEPTABLE_MIN_RR
+    regime = regime or {}
+    veto_reasons: List[str] = []
+    if rr < RISK_ACCEPTABLE_MIN_RR:
+        veto_reasons.append("RR_BELOW_MINIMUM")
+    if volatility >= RISK_ACCEPTABLE_MAX_VOLATILITY:
+        veto_reasons.append("VOLATILITY_EXTREME")
+    if regime and not regime.get("passes_trading_filter", True):
+        veto_reasons.append(f"REGIME_BLOCK:{regime.get('label')}")
+    veto = bool(veto_reasons)
     position_size_pct = (
         POSITION_SIZE_HIGH
         if risk_state == "acceptable" and volatility < LOW_VOLATILITY_THRESHOLD
@@ -549,8 +593,9 @@ def risk_agent(symbol: str, candles: List[Dict[str, float]], technical: Dict[str
         "risk_state": risk_state,
         "position_size_pct": round(position_size_pct, 2),
         "veto": veto,
-        "confidence": 0.62 if risk_state == "acceptable" else 0.4,
-        "risk_warning": "Risk filter veto active due to RR below 1:2." if veto else "Risk profile acceptable for strategy constraints.",
+        "veto_reasons": veto_reasons,
+        "confidence": 0.62 if risk_state == "acceptable" and not veto else 0.4,
+        "risk_warning": f"Risk filter veto active: {', '.join(veto_reasons)}" if veto else "Risk profile acceptable for strategy constraints.",
     }
 
 
@@ -587,6 +632,9 @@ def synthesizer_agent(
     technical: Dict[str, Any],
     sentiment: Dict[str, Any],
     risk: Dict[str, Any],
+    regime: Dict[str, Any],
+    fundamental: Dict[str, Any],
+    portfolio: Dict[str, Any],
     vector_store: VectorBacktestStore,
     degraded_mode: bool,
 ) -> Dict[str, Any]:
@@ -594,14 +642,24 @@ def synthesizer_agent(
     setup_vector = _setup_vector(technical=technical, sentiment=sentiment, risk=risk)
 
     matches = vector_store.query_similar_setups(symbol=symbol, vector=setup_vector, top_k=500)
-    total = len(matches)
-    wins = sum(1 for row in matches if row.get("success"))
+    probability_engine = HistoricalProbabilityEngine()
+    probability_snapshot = probability_engine.compute(
+        matches=matches,
+        liquidity_score=1.0 if risk.get("position_size_pct", 0) >= 1 else 0.45,
+        regime_match=regime.get("passes_trading_filter", False),
+        news_shock=bool(degraded_mode or abs(float(sentiment.get("sentiment_score", 0))) >= 70),
+    )
+    total = probability_snapshot["sample_size"]
+    wins = probability_snapshot["wins"]
 
-    probability = ((wins + 1) / (total + 2)) * 100 if total > 0 else 50.0
+    probability = probability_snapshot["calibrated_probability"]
 
     technical_signal = 1 if technical.get("bias") == "bullish" else (-1 if technical.get("bias") == "bearish" else 0)
     sentiment_signal = sentiment.get("sentiment_score", 0) / 100
     blended = 50 + technical_signal * 12 + sentiment_signal * 18
+    fundamental_component = (float(fundamental.get("score", 50.0)) - 50.0) * 0.18
+    regime_component = 6 if regime.get("label") == "bull-trend" else (-6 if regime.get("label") in {"bear-trend", "high-volatility"} else 0)
+    blended = blended + fundamental_component + regime_component
     final_probability = 0.7 * probability + 0.3 * blended if total > 0 else blended
 
     if degraded_mode:
@@ -611,8 +669,10 @@ def synthesizer_agent(
 
     rr = risk.get("risk_reward_ratio", 0)
     risk_veto = risk.get("veto", False)
+    portfolio_veto = portfolio.get("veto", False)
+    regime_pass = regime.get("passes_trading_filter", False)
 
-    if risk_veto:
+    if risk_veto or portfolio_veto or not regime_pass:
         signal = "HOLD"
     elif final_probability >= 60 and rr >= 2.0:
         signal = "BUY"
@@ -623,11 +683,13 @@ def synthesizer_agent(
 
     confidence_band = "high" if final_probability >= 68 else ("medium" if final_probability >= 53 else "low")
     consensus_score = round(abs(technical_signal + sentiment_signal) / 2, 2)
+    entry_price = technical.get("indicators", {}).get("last_close", 0.0)
+    entry_zone = {"low": round(entry_price * 0.995, 2), "high": round(entry_price * 1.005, 2)}
 
     justification = (
         f"{signal} with {round(final_probability, 2)}% probability from Bayesian top-{total} setup matching "
         f"({wins}/{total} successes). Technical={technical.get('bias')}, sentiment={sentiment.get('sentiment_score')}, "
-        f"RR={rr}, degraded_mode={degraded_mode}."
+        f"RR={rr}, regime={regime.get('label')}, fundamental={fundamental.get('score')}, degraded_mode={degraded_mode}."
     )
 
     return {
@@ -635,6 +697,11 @@ def synthesizer_agent(
         "symbol": symbol,
         "signal": signal,
         "win_probability": round(final_probability, 2),
+        "probability_engine": probability_snapshot,
+        "entry_zone": entry_zone,
+        "stop_loss": risk.get("stop_loss"),
+        "target": risk.get("take_profit"),
+        "time_horizon": "swing-5-to-20-sessions",
         "consensus_score": consensus_score,
         "confidence_band": confidence_band,
         "historical_wins": wins,
@@ -642,6 +709,14 @@ def synthesizer_agent(
         "scenario_key": scenario_key,
         "justification": justification,
         "degraded_mode": degraded_mode,
+        "decision_trace": {
+            "technical": {"bias": technical.get("bias"), "confidence": technical.get("confidence")},
+            "sentiment": {"score": sentiment.get("sentiment_score"), "confidence": sentiment.get("confidence")},
+            "fundamental": {"score": fundamental.get("score"), "period": fundamental.get("latest_filed_period")},
+            "regime": {"label": regime.get("label"), "confidence": regime.get("confidence")},
+            "risk": {"veto": risk.get("veto"), "reasons": risk.get("veto_reasons", [])},
+            "portfolio": {"veto": portfolio.get("veto"), "reasons": portfolio.get("veto_reasons", [])},
+        },
         "confidence_modifier": 0.9 if degraded_mode else 1.0,
     }
 
@@ -651,9 +726,16 @@ def build_brain_log(
     sentiment: Dict[str, Any],
     risk: Dict[str, Any],
     synthesis: Dict[str, Any],
-    degrade_reasons: List[str],
+    regime: Optional[Dict[str, Any]] = None,
+    fundamental: Optional[Dict[str, Any]] = None,
+    degrade_reasons: Optional[List[str]] = None,
+    portfolio: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, str]]:
     now = datetime.now(timezone.utc).isoformat()
+    regime = regime or {}
+    fundamental = fundamental or {}
+    portfolio = portfolio or {}
+    degrade_reasons = degrade_reasons or []
     logs = [
         {
             "timestamp": now,
@@ -670,11 +752,26 @@ def build_brain_log(
         },
         {
             "timestamp": now,
+            "agent": "Fundamental Analyst",
+            "message": f"Score={fundamental.get('score')} period={fundamental.get('latest_filed_period')}",
+        },
+        {
+            "timestamp": now,
+            "agent": "Regime Detector",
+            "message": f"Regime={regime.get('label')} confidence={regime.get('confidence')}",
+        },
+        {
+            "timestamp": now,
             "agent": "Risk Manager",
             "message": (
                 f"VaR={risk.get('value_at_risk_95')} RR={risk.get('risk_reward_ratio')} "
                 f"SL={risk.get('stop_loss')} TP={risk.get('take_profit')} veto={risk.get('veto')}"
             ),
+        },
+        {
+            "timestamp": now,
+            "agent": "Portfolio Controller",
+            "message": f"Allocation={portfolio.get('allocation_notional')} veto={portfolio.get('veto')}",
         },
         {
             "timestamp": now,
@@ -700,6 +797,14 @@ def build_langgraph_orchestrator(
         technical = technical_agent(symbol=state["symbol"], candles=state["candles"])
         return {"technical": technical}
 
+    def fundamental_node(state: MarketAgentState) -> MarketAgentState:
+        market = state.get("quote_payload", {})
+        filings = []
+        if isinstance(market, dict):
+            filings = market.get("filings", []) or market.get("financials", []) or []
+        fundamental = FundamentalAgent().analyze(symbol=state["symbol"], filings=filings)
+        return {"fundamental": fundamental}
+
     def sentiment_node(state: MarketAgentState) -> MarketAgentState:
         sentiment = sentiment_agent(symbol=state["symbol"], news_payload=state["news_payload"])
         degraded = bool(sentiment.get("degraded"))
@@ -708,9 +813,23 @@ def build_langgraph_orchestrator(
             reasons.append("News sources rate-limited/unavailable; sentiment confidence reduced.")
         return {"sentiment": sentiment, "degraded_mode": degraded, "degrade_reasons": reasons}
 
+    def regime_node(state: MarketAgentState) -> MarketAgentState:
+        regime = RegimeAgent().classify(symbol=state["symbol"], candles=state["candles"])
+        return {"regime": regime}
+
     def risk_node(state: MarketAgentState) -> MarketAgentState:
-        risk = risk_agent(symbol=state["symbol"], candles=state["candles"], technical=state["technical"])
+        risk = risk_agent(symbol=state["symbol"], candles=state["candles"], technical=state["technical"], regime=state["regime"])
         return {"risk": risk}
+
+    def portfolio_node(state: MarketAgentState) -> MarketAgentState:
+        portfolio = PortfolioAgent().plan(
+            cash=1_000_000.0,
+            positions=[],
+            candidate={"symbol": state["symbol"]},
+            risk=state["risk"],
+            sector=state["fundamental"].get("sector", "UNKNOWN"),
+        )
+        return {"portfolio": portfolio}
 
     def synthesizer_node(state: MarketAgentState) -> MarketAgentState:
         synthesis = synthesizer_agent(
@@ -718,21 +837,30 @@ def build_langgraph_orchestrator(
             technical=state["technical"],
             sentiment=state["sentiment"],
             risk=state["risk"],
+            regime=state["regime"],
+            fundamental=state["fundamental"],
+            portfolio=state["portfolio"],
             vector_store=vector_store,
             degraded_mode=bool(state.get("degraded_mode", False)),
         )
         return {"synthesis": synthesis}
 
-    graph.add_node("technical", technical_node)
-    graph.add_node("sentiment", sentiment_node)
-    graph.add_node("risk", risk_node)
-    graph.add_node("synthesizer", synthesizer_node)
+    graph.add_node("technical_agent", technical_node)
+    graph.add_node("fundamental_agent", fundamental_node)
+    graph.add_node("sentiment_agent", sentiment_node)
+    graph.add_node("regime_agent", regime_node)
+    graph.add_node("risk_agent", risk_node)
+    graph.add_node("portfolio_agent", portfolio_node)
+    graph.add_node("synthesizer_agent", synthesizer_node)
 
-    graph.set_entry_point("technical")
-    graph.add_edge("technical", "sentiment")
-    graph.add_edge("sentiment", "risk")
-    graph.add_edge("risk", "synthesizer")
-    graph.add_edge("synthesizer", END)
+    graph.set_entry_point("technical_agent")
+    graph.add_edge("technical_agent", "fundamental_agent")
+    graph.add_edge("fundamental_agent", "sentiment_agent")
+    graph.add_edge("sentiment_agent", "regime_agent")
+    graph.add_edge("regime_agent", "risk_agent")
+    graph.add_edge("risk_agent", "portfolio_agent")
+    graph.add_edge("portfolio_agent", "synthesizer_agent")
+    graph.add_edge("synthesizer_agent", END)
 
     app = graph.compile()
     state = app.invoke(
@@ -769,8 +897,11 @@ def build_dashboard_snapshot(
     )
 
     technical = state["technical"]
+    fundamental = state["fundamental"]
     sentiment = state["sentiment"]
+    regime = state["regime"]
     risk = state["risk"]
+    portfolio = state["portfolio"]
     synthesis = state["synthesis"]
     degrade_reasons = state.get("degrade_reasons", [])
 
@@ -843,18 +974,32 @@ def build_dashboard_snapshot(
         "agents": {
             "technical": technical,
             "sentiment": sentiment,
+            "fundamental": fundamental,
+            "regime": regime,
             "risk": risk,
+            "portfolio": portfolio,
             "synthesizer": synthesis,
         },
         "paper_trading": {
             "latest_position": paper_position,
             "summary": paper_trader.get_summary(symbol=symbol),
         },
+        "backtest": run_walk_forward_backtest(candles),
+        "compliance": {
+            "mode": "advisory",
+            "live_trading_enabled": False,
+            "human_approval_required": True,
+            "kill_switch_enabled": True,
+            "disclaimer": "Decision support only. This platform does not guarantee profits and is not investment advice.",
+        },
         "brain_log": build_brain_log(
             technical=technical,
             sentiment=sentiment,
             risk=risk,
             synthesis=synthesis,
+            regime=regime,
+            fundamental=fundamental,
+            portfolio=portfolio,
             degrade_reasons=degrade_reasons,
         ),
     }

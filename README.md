@@ -197,3 +197,22 @@ cd app/frontend
 npm run lint
 npm run build
 ```
+
+## NSE/BSE Market AI Hardening (Phase 1-3)
+
+This repository now includes deployment-safe foundations for the decision-support system described in the build specification:
+
+- **Separated market agents** for universe filtering, technicals, fundamentals, sentiment, regime detection, risk, portfolio controls, synthesis, execution gating, and walk-forward backtesting.
+- **Traceable data contracts** with source metadata, UTC canonical timestamps, Asia/Kolkata source timezone support, freshness confidence, stale/incomplete flags, and an explicit missing-data policy template.
+- **TimescaleDB schema migration** in `app/backend/migrations/001_market_ai_schema.sql` that separates raw OHLCV, corporate actions, feature snapshots, agent outputs, historical setups, final decisions, and execution audit records.
+- **Safety defaults**: advisory mode, live trading disabled, human approval required, kill switch enabled, risk veto support, and prominent non-advice/no-guarantee disclaimers.
+- **Operational API additions**:
+  - `GET /api/universe` — clean tradable universe contract.
+  - `GET /api/rankings` — ranked candidate list with reasons using the shared decision engine and sample deployment data.
+  - `GET /api/backtest/walk-forward/{symbol}` — repeatable walk-forward baseline metrics.
+  - `GET /api/execution/config` — current execution mode, kill switch, and audit event state.
+  - `POST /api/execution/mode` — switch advisory/paper/live mode.
+  - `POST /api/execution/kill-switch` — enable/disable new order requests.
+  - `POST /api/execution/orders` — audited order request path that never bypasses risk, portfolio, approval, or kill-switch gates.
+
+> Risk warning: Kubera is decision support software. It does not provide investment advice and never guarantees profits. Live broker integration must remain disabled until paper trading, audit logging, broker-specific compliance checks, and explicit human approval workflows have been independently validated.

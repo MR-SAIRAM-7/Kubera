@@ -17,34 +17,42 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.cors import CORSMiddleware
 
-try:
-    from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-except ImportError as exc:
+import importlib
+import importlib.util
+
+if importlib.util.find_spec("aiokafka"):
+    _kafka_admin = importlib.import_module("aiokafka.admin")
+    AIOKafkaAdminClient = _kafka_admin.AIOKafkaAdminClient
+    NewTopic = _kafka_admin.NewTopic
+else:
     logger = logging.getLogger(__name__)
-    logger.warning("aiokafka is unavailable; Kafka topic auto-provisioning disabled: %s", exc)
+    logger.warning("aiokafka is unavailable; Kafka topic auto-provisioning disabled")
     AIOKafkaAdminClient = None
     NewTopic = None
 
-try:
-    from .NSE.nseScraper import NSEScraper, NSEScraperError
-    from .BSE.bseScraper import BSEScraper
-    from .social.getNews import NewsScraper, NewsScraperError
-    from .agents import (
-        PaperTradingEngine,
-        ScenarioStore,
-        VectorBacktestStore,
-        build_dashboard_snapshot,
-    )
-except ImportError:
-    from NSE.nseScraper import NSEScraper, NSEScraperError
-    from BSE.bseScraper import BSEScraper
-    from social.getNews import NewsScraper, NewsScraperError
-    from agents import (
-        PaperTradingEngine,
-        ScenarioStore,
-        VectorBacktestStore,
-        build_dashboard_snapshot,
-    )
+_backend_pkg = __package__ or ""
+_import_prefix = f"{_backend_pkg}." if _backend_pkg else ""
+_nse_mod = importlib.import_module(f"{_import_prefix}NSE.nseScraper")
+_bse_mod = importlib.import_module(f"{_import_prefix}BSE.bseScraper")
+_news_mod = importlib.import_module(f"{_import_prefix}social.getNews")
+_agents_mod = importlib.import_module(f"{_import_prefix}agents")
+_market_ai_mod = importlib.import_module(f"{_import_prefix}market_ai")
+NSEScraper = _nse_mod.NSEScraper
+NSEScraperError = _nse_mod.NSEScraperError
+BSEScraper = _bse_mod.BSEScraper
+NewsScraper = _news_mod.NewsScraper
+NewsScraperError = _news_mod.NewsScraperError
+PaperTradingEngine = _agents_mod.PaperTradingEngine
+ScenarioStore = _agents_mod.ScenarioStore
+VectorBacktestStore = _agents_mod.VectorBacktestStore
+build_dashboard_snapshot = _agents_mod.build_dashboard_snapshot
+InMemoryAuditEventBus = _market_ai_mod.InMemoryAuditEventBus
+ExecutionAgent = _market_ai_mod.ExecutionAgent
+OrderRequest = _market_ai_mod.OrderRequest
+TradableInstrument = _market_ai_mod.TradableInstrument
+UniverseAgent = _market_ai_mod.UniverseAgent
+SourceMetadata = _market_ai_mod.SourceMetadata
+run_walk_forward_backtest = _market_ai_mod.run_walk_forward_backtest
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -66,6 +74,8 @@ api_router = APIRouter(prefix="/api")
 scenario_store = ScenarioStore(max_samples_per_scenario=500)
 vector_store = VectorBacktestStore(max_items_per_symbol=3000)
 paper_trader = PaperTradingEngine()
+audit_event_bus = InMemoryAuditEventBus(max_events=2000)
+execution_agent = ExecutionAgent(event_bus=audit_event_bus)
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9:._-]{1,64}$")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC_PARTITIONS = int(os.environ.get("KAFKA_TOPIC_PARTITIONS", "3"))
@@ -293,6 +303,68 @@ class PredictionOutcome(BaseModel):
     exit_price: float
 
 
+class ExecutionModeUpdate(BaseModel):
+    mode: str
+
+
+class KillSwitchUpdate(BaseModel):
+    enabled: bool
+
+
+class ApprovedOrderCreate(BaseModel):
+    symbol: str
+    side: str
+    quantity: int = Field(gt=0)
+    order_type: str = "MARKET"
+    price: Optional[float] = None
+    approved_by: Optional[str] = None
+    strategy_version: str = "rules-v1"
+    model_version: str = "rules-v1"
+    input_snapshot: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _load_sample_universe() -> List[Any]:
+    path = ROOT_DIR / "sample_data" / "universe.json"
+    raw_items = json.loads(path.read_text()) if path.exists() else []
+    instruments = []
+    for row in raw_items:
+        instruments.append(
+            TradableInstrument(
+                symbol=row.get("symbol", ""),
+                exchange=row.get("exchange", "NSE"),
+                name=row.get("name", ""),
+                sector=row.get("sector", "UNKNOWN"),
+                status=row.get("status", "ACTIVE"),
+                avg_traded_value=float(row.get("avg_traded_value", 0)),
+                data_quality_score=float(row.get("data_quality_score", 1)),
+                metadata=SourceMetadata(source="sample_data/universe.json"),
+            )
+        )
+    return instruments
+
+
+def _deterministic_candles(seed_price: float = 1000.0, points: int = 180) -> List[Dict[str, float]]:
+    candles: List[Dict[str, float]] = []
+    price = seed_price
+    for idx in range(points):
+        drift = 0.0015 if idx % 37 < 23 else -0.001
+        seasonal = ((idx % 11) - 5) / 10_000
+        open_price = price
+        close_price = max(1.0, price * (1 + drift + seasonal))
+        high_price = max(open_price, close_price) * 1.006
+        low_price = min(open_price, close_price) * 0.994
+        candles.append({
+            "t": idx,
+            "open": round(open_price, 2),
+            "high": round(high_price, 2),
+            "low": round(low_price, 2),
+            "close": round(close_price, 2),
+            "volume": 100000 + idx * 250,
+        })
+        price = close_price
+    return candles
+
+
 websocket_hub = WebSocketHub()
 alert_dispatcher = AlertDispatcher()
 ticker_registry = DynamicTickerRegistry()
@@ -366,6 +438,88 @@ async def _build_snapshot(symbol: str, news_limit: int, force_refresh: bool = Fa
             return payload
 
     raise HTTPException(status_code=502, detail="Dashboard synthesis failed. Live data source is unavailable.")
+
+
+
+
+@api_router.get("/universe")
+async def get_clean_universe():
+    universe = UniverseAgent().scan(_load_sample_universe())
+    return {
+        **universe,
+        "note": "Use this contract with live NSE/BSE master files in production; bundled data is a deployment-safe sample.",
+    }
+
+
+@api_router.get("/rankings")
+async def get_ranked_candidates():
+    universe = UniverseAgent().scan(_load_sample_universe())
+    ranked = []
+    for row in universe["accepted"]:
+        candles = _deterministic_candles(seed_price=1000 + len(row["symbol"]) * 17)
+        snapshot = build_dashboard_snapshot(
+            symbol=row["symbol"],
+            quote_payload={"stock": {"last_price": candles[-1]["close"], "previous_close": candles[-2]["close"]}},
+            news_payload={"items": [], "source": "sample"},
+            scenario_store=scenario_store,
+            vector_store=vector_store,
+            paper_trader=paper_trader,
+            nse_raw_fetcher=lambda _path, _ticker, candles=candles: {"data": candles},
+            lookback_points=180,
+        )
+        synth = snapshot["agents"]["synthesizer"]
+        risk = snapshot["agents"]["risk"]
+        ranked.append({
+            "symbol": row["symbol"],
+            "sector": row["sector"],
+            "direction": synth["signal"],
+            "score": synth["consensus_score"],
+            "probability": synth["win_probability"],
+            "confidence": synth["confidence_band"],
+            "entry_zone": synth["entry_zone"],
+            "stop_loss": risk.get("stop_loss"),
+            "target": risk.get("take_profit"),
+            "status": "risk-veto" if risk.get("veto") else "candidate",
+            "rationale": synth["decision_trace"],
+        })
+    ranked.sort(key=lambda item: (item["probability"], item["score"]), reverse=True)
+    return {"ranked_candidates": ranked, "disclaimer": "Decision support only; no guaranteed profits or investment advice."}
+
+
+@api_router.get("/backtest/walk-forward/{symbol}")
+async def get_walk_forward_backtest(symbol: str):
+    normalized = _normalize_symbol(symbol)
+    return {"symbol": normalized, **run_walk_forward_backtest(_deterministic_candles(points=240))}
+
+
+@api_router.get("/execution/config")
+async def get_execution_config():
+    return {
+        "mode": execution_agent.mode,
+        "kill_switch_enabled": execution_agent.kill_switch_enabled,
+        "human_approval_required_for_live": True,
+        "audit_events": audit_event_bus.latest(limit=20),
+    }
+
+
+@api_router.post("/execution/mode")
+async def set_execution_mode(payload: ExecutionModeUpdate):
+    execution_agent.set_mode(payload.mode)
+    return await get_execution_config()
+
+
+@api_router.post("/execution/kill-switch")
+async def set_execution_kill_switch(payload: KillSwitchUpdate):
+    execution_agent.set_kill_switch(payload.enabled)
+    return await get_execution_config()
+
+
+@api_router.post("/execution/orders")
+async def create_audited_order(payload: ApprovedOrderCreate):
+    order = OrderRequest(**payload.model_dump())
+    risk_snapshot = payload.input_snapshot.get("risk", {"veto": True, "veto_reasons": ["MISSING_RISK_SNAPSHOT"]})
+    portfolio_snapshot = payload.input_snapshot.get("portfolio", {"veto": True, "veto_reasons": ["MISSING_PORTFOLIO_SNAPSHOT"]})
+    return execution_agent.submit(order=order, risk=risk_snapshot, portfolio=portfolio_snapshot)
 
 
 @api_router.get("/")

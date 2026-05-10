@@ -24,7 +24,10 @@ const MotionArticle = motion.article;
 const agentStyles = {
   "Technical Analyst": "border-l-[#22D3EE] text-[#22D3EE]",
   "Sentiment Analyst": "border-l-[#10B981] text-[#10B981]",
+  "Fundamental Analyst": "border-l-[#A78BFA] text-[#A78BFA]",
+  "Regime Detector": "border-l-[#F472B6] text-[#F472B6]",
   "Risk Manager": "border-l-[#F59E0B] text-[#F59E0B]",
+  "Portfolio Controller": "border-l-[#F97316] text-[#F97316]",
   "Chief Synthesizer": "border-l-[#0EA5E9] text-[#0EA5E9]",
 };
 
@@ -235,8 +238,13 @@ const App = () => {
   const risk = snapshot?.agents?.risk;
   const sentiment = snapshot?.agents?.sentiment;
   const technical = snapshot?.agents?.technical;
+  const fundamental = snapshot?.agents?.fundamental;
+  const regime = snapshot?.agents?.regime;
+  const portfolio = snapshot?.agents?.portfolio;
   const market = snapshot?.market;
   const paperTrading = snapshot?.paper_trading?.summary;
+  const compliance = snapshot?.compliance;
+  const backtest = snapshot?.backtest;
   const probability = Number(synthesized?.win_probability ?? 0);
   const rr = Number(risk?.risk_reward_ratio ?? 0);
 
@@ -268,12 +276,19 @@ const App = () => {
         toneClass: risk?.risk_reward_ratio >= 2 ? "text-[#10B981]" : "text-[#F59E0B]",
       },
       {
+        label: "Regime",
+        value: regime?.label ?? "-",
+        toneClass: regime?.passes_trading_filter ? "text-[#10B981]" : "text-[#F59E0B]",
+      },
+      {
         label: "Confidence Band",
         value: synthesized?.confidence_band ?? "-",
         toneClass: synthesized?.confidence_band === "high" ? "text-[#10B981]" : "text-[#F59E0B]",
       },
     ],
     [
+      regime?.label,
+      regime?.passes_trading_filter,
       risk?.risk_reward_ratio,
       sentiment?.sentiment_score,
       synthesized?.confidence_band,
@@ -341,9 +356,13 @@ const App = () => {
       {snapshot?.warning ? (
         <div className="relative z-10 mt-2 border border-[#F59E0B] bg-[#2A220F] p-2 text-xs text-[#FCD34D]">{snapshot.warning}</div>
       ) : null}
+      <div className="relative z-10 mt-2 border border-[#F59E0B] bg-[#2A220F] p-3 text-xs text-[#FCD34D]">
+        Advisory mode is active. Live orders are disabled unless audit logging, human approval, risk gates, and the kill switch policy pass.
+        {compliance?.disclaimer ? ` ${compliance.disclaimer}` : ""}
+      </div>
 
       <main className="relative z-10 mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
-        <section className="col-span-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-8 lg:grid-cols-5">
+        <section className="col-span-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-8 lg:grid-cols-6">
           {cards.map((card) => (
             <MetricCard key={card.label} {...card} />
           ))}
@@ -368,6 +387,38 @@ const App = () => {
             <p>Win rate: {paperTrading?.win_rate ?? 0}%</p>
             <p className={statusTone(paperTrading?.realized_pnl)}>Realized PnL: {paperTrading?.realized_pnl ?? 0}</p>
             <p className={statusTone(paperTrading?.unrealized_pnl)}>Unrealized PnL: {paperTrading?.unrealized_pnl ?? 0}</p>
+          </div>
+        </section>
+
+
+
+        <section className={`${cardClassName} col-span-12 lg:col-span-4`}>
+          <h3 className="mb-3 text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Regime + Fundamentals</h3>
+          <div className="space-y-2 text-sm text-[#E4E4E7]">
+            <p>Regime: <span className="font-semibold text-[#F472B6]">{regime?.label ?? "-"}</span></p>
+            <p>Regime confidence: {regime?.confidence ?? "-"}</p>
+            <p>Fundamental score: <span className="font-semibold text-[#A78BFA]">{fundamental?.score ?? "-"}</span></p>
+            <p>Filed period: {fundamental?.latest_filed_period ?? "UNAVAILABLE"}</p>
+          </div>
+        </section>
+
+        <section className={`${cardClassName} col-span-12 lg:col-span-4`}>
+          <h3 className="mb-3 text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Portfolio Guardrails</h3>
+          <div className="space-y-2 text-sm text-[#E4E4E7]">
+            <p>Allocation: {portfolio?.allocation_notional ?? "-"}</p>
+            <p>Heat: {portfolio?.portfolio_heat_pct ?? "-"}%</p>
+            <p>Single stock exposure: {portfolio?.single_stock_exposure_pct ?? "-"}%</p>
+            <p className={portfolio?.veto ? "text-[#EF4444]" : "text-[#10B981]"}>Veto: {String(portfolio?.veto ?? false)}</p>
+          </div>
+        </section>
+
+        <section className={`${cardClassName} col-span-12 lg:col-span-4`}>
+          <h3 className="mb-3 text-xs uppercase tracking-[0.2em] text-[#A1A1AA]">Backtest Snapshot</h3>
+          <div className="space-y-2 text-sm text-[#E4E4E7]">
+            <p>Status: {backtest?.status ?? "-"}</p>
+            <p>CAGR: {backtest?.metrics?.cagr_pct ?? "-"}%</p>
+            <p>Max drawdown: {backtest?.metrics?.max_drawdown_pct ?? "-"}%</p>
+            <p>Sharpe: {backtest?.metrics?.sharpe_ratio ?? "-"}</p>
           </div>
         </section>
 
