@@ -1,0 +1,31 @@
+{
+  "mode": "advisory",
+  "timezone": "Asia/Kolkata",
+  "risk": {
+    "max_risk_per_trade_pct": 1.0,
+    "max_portfolio_heat_pct": 6.0,
+    "max_sector_exposure_pct": 30.0,
+    "max_single_stock_exposure_pct": 10.0,
+    "min_risk_reward": 2.0
+  },
+  "universe": {
+    "exchanges": ["NSE", "BSE"],
+    "min_avg_traded_value": 5000000,
+    "min_data_quality_score": 0.7
+  },
+  "execution": {
+    "live_trading_enabled": false,
+    "human_approval_required": true,
+    "kill_switch_enabled": true
+  },
+  "data_quality": {
+    "timestamp_canonical_timezone": "UTC",
+    "display_timezone": "Asia/Kolkata",
+    "missing_data_policy": {
+      "ohlcv.close": "reject",
+      "ohlcv.volume": "flag_incomplete",
+      "fundamentals": "use_latest_filed_only",
+      "news": "deduplicate_and_timestamp"
+    }
+  }
+}

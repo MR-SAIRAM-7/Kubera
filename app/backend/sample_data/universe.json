@@ -1,0 +1,6 @@
+[
+  {"symbol": "NSE:RELIANCE", "exchange": "NSE", "name": "Reliance Industries", "sector": "Energy", "avg_traded_value": 5000000000, "data_quality_score": 0.98, "status": "ACTIVE"},
+  {"symbol": "NSE:TCS", "exchange": "NSE", "name": "Tata Consultancy Services", "sector": "IT", "avg_traded_value": 2500000000, "data_quality_score": 0.97, "status": "ACTIVE"},
+  {"symbol": "BSE:500325", "exchange": "BSE", "name": "Reliance Industries", "sector": "Energy", "avg_traded_value": 3000000000, "data_quality_score": 0.96, "status": "ACTIVE"},
+  {"symbol": "NSE:ILLQ", "exchange": "NSE", "name": "Illiquid Sample", "sector": "SME", "avg_traded_value": 10000, "data_quality_score": 0.91, "status": "ACTIVE"}
+]
